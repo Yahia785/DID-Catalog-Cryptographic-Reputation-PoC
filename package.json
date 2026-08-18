@@ -1,0 +1,31 @@
+{
+  "name": "didcal-poc",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+  "demo": "tsx demo/full-demo.ts",
+  "demo:dry": "tsx demo/full-demo.ts --dry-run",
+  "verify": "tsx src/shared/verify-setup.ts",
+  "phase2": "tsx src/identity/verify-identity.ts",
+  "phase2:dry": "tsx src/identity/verify-identity.ts --dry-run",
+  "phase3": "tsx src/ratings/verify-ratings.ts",
+  "phase5": "tsx src/verification/verify-demo.ts",
+  "demo:identity": "tsx demo/demo-identity.ts",
+  "demo:rating": "tsx demo/demo-rating.ts",
+  "demo:verify": "tsx demo/demo-verify.ts"
+},
+  "dependencies": {
+    "@atproto/crypto": "^0.5.4",
+    "@ipld/dag-cbor": "^10.0.2",
+    "@noble/hashes": "^2.3.0",
+    "chalk": "^6.0.0",
+    "did-jwt-vc": "^4.0.16",
+    "did-resolver": "^5.0.1",
+    "multiformats": "^14.0.5"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "tsx": "^4.23.12",
+    "typescript": "^7.0.2"
+  }
+}
