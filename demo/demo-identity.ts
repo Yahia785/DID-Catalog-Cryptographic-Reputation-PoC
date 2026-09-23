@@ -5,65 +5,67 @@ import { createIdentity } from '../src/identity/create-identity.js';
 
 const OUTPUT = path.resolve('output');
 
+/**
+ * Serialize an Identity object to a JSON-safe format (hex-encode keys).
+ */
+function serializeIdentity(identity: Awaited<ReturnType<typeof createIdentity>>) {
+  return {
+    did: identity.did,
+    role: identity.role,
+    rotationKeyPair: {
+      did: identity.rotationKeyPair.did,
+      publicKey: Buffer.from(identity.rotationKeyPair.publicKey).toString('hex'),
+      privateKey: Buffer.from(identity.rotationKeyPair.privateKey).toString('hex'),
+    },
+    signingKeyPair: {
+      did: identity.signingKeyPair.did,
+      publicKey: Buffer.from(identity.signingKeyPair.publicKey).toString('hex'),
+      privateKey: Buffer.from(identity.signingKeyPair.privateKey).toString('hex'),
+    },
+    plcOperation: identity.plcOperation,
+    plcDirectoryUrl: `https://plc.directory/${identity.did}`,
+  };
+}
+
 async function main() {
   console.log(chalk.bold('\n=== DIDcal Demo: Identity Creation ===\n'));
 
   if (!fs.existsSync(OUTPUT)) fs.mkdirSync(OUTPUT, { recursive: true });
 
-  // Create researcher
-  console.log(chalk.blue('Creating researcher identity...'));
-  const researcher = await createIdentity('researcher', 'demo-researcher', { dryRun: false });
+  // ── 1. Create platform identity ────────────────────────────
+  // The platform is the entity that computes and signs venue scores.
+  // It needs a DID so verifiers can look up its public key.
+  console.log(chalk.blue('Creating platform identity...'));
+  const platform = await createIdentity('platform', 'didcal-platform', { dryRun: false });
 
-  const researcherFile = {
-    did: researcher.did,
-    role: researcher.role,
-    rotationKeyPair: {
-      did: researcher.rotationKeyPair.did,
-      publicKey: Buffer.from(researcher.rotationKeyPair.publicKey).toString('hex'),
-      privateKey: Buffer.from(researcher.rotationKeyPair.privateKey).toString('hex'),
-    },
-    signingKeyPair: {
-      did: researcher.signingKeyPair.did,
-      publicKey: Buffer.from(researcher.signingKeyPair.publicKey).toString('hex'),
-      privateKey: Buffer.from(researcher.signingKeyPair.privateKey).toString('hex'),
-    },
-    plcOperation: researcher.plcOperation,
-    plcDirectoryUrl: `https://plc.directory/${researcher.did}`,
-  };
-
-  fs.writeFileSync(path.join(OUTPUT, 'researcher.json'), JSON.stringify(researcherFile, null, 2));
-  console.log(chalk.green(`✓ Researcher DID: ${researcher.did}`));
-  console.log(chalk.cyan(`  Live at: https://plc.directory/${researcher.did}`));
-  console.log(chalk.gray(`  Saved to: output/researcher.json`));
+  fs.writeFileSync(
+    path.join(OUTPUT, 'platform.json'),
+    JSON.stringify(serializeIdentity(platform), null, 2)
+  );
+  console.log(chalk.green(`✓ Platform DID: ${platform.did}`));
+  console.log(chalk.cyan(`  Live at: https://plc.directory/${platform.did}`));
+  console.log(chalk.gray(`  Saved to: output/platform.json`));
   console.log();
 
-  // Create venue
+  // ── 2. Create venue identity ───────────────────────────────
+  // The platform creates venue DIDs on behalf of venues.
+  // Venues can later claim their DID via key rotation (see demo:claim).
   console.log(chalk.blue('Creating venue identity...'));
   const venue = await createIdentity('venue', 'demo-venue', { dryRun: false });
 
-  const venueFile = {
-    did: venue.did,
-    role: venue.role,
-    rotationKeyPair: {
-      did: venue.rotationKeyPair.did,
-      publicKey: Buffer.from(venue.rotationKeyPair.publicKey).toString('hex'),
-      privateKey: Buffer.from(venue.rotationKeyPair.privateKey).toString('hex'),
-    },
-    signingKeyPair: {
-      did: venue.signingKeyPair.did,
-      publicKey: Buffer.from(venue.signingKeyPair.publicKey).toString('hex'),
-      privateKey: Buffer.from(venue.signingKeyPair.privateKey).toString('hex'),
-    },
-    plcOperation: venue.plcOperation,
-    plcDirectoryUrl: `https://plc.directory/${venue.did}`,
-  };
-
-  fs.writeFileSync(path.join(OUTPUT, 'venue.json'), JSON.stringify(venueFile, null, 2));
+  fs.writeFileSync(
+    path.join(OUTPUT, 'venue.json'),
+    JSON.stringify(serializeIdentity(venue), null, 2)
+  );
   console.log(chalk.green(`✓ Venue DID: ${venue.did}`));
   console.log(chalk.cyan(`  Live at: https://plc.directory/${venue.did}`));
   console.log(chalk.gray(`  Saved to: output/venue.json`));
 
   console.log(chalk.bold('\n=== Open the URLs above in a browser to see the live DID documents ===\n'));
+  console.log(chalk.gray('Next steps:'));
+  console.log(chalk.gray('  npm run demo:score   — compute and sign a venue score'));
+  console.log(chalk.gray('  npm run demo:verify  — verify the signed score'));
+  console.log(chalk.gray('  npm run demo:claim   — venue claims its DID via key rotation'));
 }
 
 main().catch(console.error);

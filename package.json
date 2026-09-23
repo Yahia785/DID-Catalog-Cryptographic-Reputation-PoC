@@ -1,19 +1,20 @@
 {
   "name": "didcal-poc",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "type": "module",
   "scripts": {
-  "demo": "tsx demo/full-demo.ts",
-  "demo:dry": "tsx demo/full-demo.ts --dry-run",
-  "verify": "tsx src/shared/verify-setup.ts",
-  "phase2": "tsx src/identity/verify-identity.ts",
-  "phase2:dry": "tsx src/identity/verify-identity.ts --dry-run",
-  "phase3": "tsx src/ratings/verify-ratings.ts",
-  "phase5": "tsx src/verification/verify-demo.ts",
-  "demo:identity": "tsx demo/demo-identity.ts",
-  "demo:rating": "tsx demo/demo-rating.ts",
-  "demo:verify": "tsx demo/demo-verify.ts"
-},
+    "verify": "tsx src/shared/verify-setup.ts",
+
+    "demo": "tsx demo/full-demo.ts",
+    "demo:dry": "tsx demo/full-demo.ts --dry-run",
+    "demo:identity": "tsx demo/demo-identity.ts",
+    "demo:score": "tsx demo/demo-score.ts",
+    "demo:verify": "tsx demo/demo-verify.ts",
+    "demo:claim": "tsx demo/demo-claim.ts",
+
+    "phase2": "tsx src/identity/verify-identity.ts",
+    "phase2:dry": "tsx src/identity/verify-identity.ts --dry-run"
+  },
   "dependencies": {
     "@atproto/crypto": "^0.5.4",
     "@ipld/dag-cbor": "^10.0.2",

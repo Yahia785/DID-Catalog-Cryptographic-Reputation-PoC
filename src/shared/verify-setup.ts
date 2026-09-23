@@ -4,7 +4,7 @@ import { base58btc } from 'multiformats/bases/base58';
 import { base32 } from 'multiformats/bases/base32';
 import chalk from 'chalk';
 import crypto from 'node:crypto';
-import type { Identity, RatingPayload, ReputationScore } from './types.js';
+import type { Identity, ScorePayload, ReputationScore } from './types.js';
 
 async function verifySetup() {
   console.log(chalk.bold('\n=== DIDcal PoC Setup Verification ===\n'));
@@ -72,7 +72,7 @@ async function verifySetup() {
 
   // 7. Types compile check
   const testIdentity: Partial<Identity> = { role: 'researcher' };
-  const testPayload: Partial<RatingPayload> = { type: 'VenueRating' };
+  const testPayload: Partial<ScorePayload> = { type: 'VenueScore' };
   const testScore: Partial<ReputationScore> = { score: 0.85 };
   console.log(chalk.green('✓ types'), '- all type definitions compile');
 

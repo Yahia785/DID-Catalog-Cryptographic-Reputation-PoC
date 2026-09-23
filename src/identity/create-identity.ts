@@ -67,13 +67,25 @@ function generateP256KeyPair(): {
 /**
  * Build the PLC genesis operation object (without signature).
  * Follows PLC spec v0.3.0.
+ *
+ * The 'platform' role uses the same structure as venue/researcher
+ * but with a distinct service endpoint identifying it as the
+ * DIDcal scoring platform.
  */
 function buildGenesisOperation(
   rotationKeyDid: string,
   signingKeyDid: string,
-  role: 'researcher' | 'venue',
+  role: 'researcher' | 'venue' | 'platform',
   label: string
 ): Record<string, unknown> {
+  const serviceEndpoint = role === 'platform'
+    ? 'https://didcal.io/platform'
+    : `https://didcal.io/${role}s`;
+
+  const serviceType = role === 'platform'
+    ? 'DIDcalPlatform'
+    : 'DIDcalEntity';
+
   return {
     type: 'plc_operation',
     rotationKeys: [rotationKeyDid],
@@ -88,8 +100,8 @@ function buildGenesisOperation(
         endpoint: 'https://api.didcal.io',
       },
       didcal: {
-        type: 'DIDcalEntity',
-        endpoint: `https://didcal.io/${role}s`,
+        type: serviceType,
+        endpoint: serviceEndpoint,
       },
     },
     prev: null,
@@ -127,7 +139,7 @@ async function signGenesisOperation(
   const signedCbor = dagCbor.encode(signedOp);
   const hash = crypto.createHash('sha256').update(signedCbor).digest();
 
-// 6. Derive DID from hash
+  // 6. Derive DID from hash
   const hashBase32 = base32.encode(hash);
   // base32.encode returns multibase-prefixed string ('b' prefix for base32lower)
   const hashStr = hashBase32.startsWith('b') ? hashBase32.slice(1) : hashBase32;
@@ -156,13 +168,13 @@ async function publishToDirectory(
 }
 
 /**
- * Create a DID:PLC identity for a researcher or venue.
+ * Create a DID:PLC identity for a researcher, venue, or platform.
  *
  * Generates both keypairs locally, builds and signs the PLC genesis operation,
  * optionally publishes to plc.directory, and returns the full identity object.
  */
 export async function createIdentity(
-  role: 'researcher' | 'venue',
+  role: 'researcher' | 'venue' | 'platform',
   label: string,
   options: { dryRun?: boolean } = {}
 ): Promise<Identity> {
