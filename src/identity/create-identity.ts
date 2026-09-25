@@ -39,7 +39,7 @@ function p256PublicKeyToDidKey(compressedPubKey: Buffer): string {
  * Generate a P-256 keypair using node:crypto.
  * Returns raw private key bytes, compressed public key bytes, and did:key string.
  */
-function generateP256KeyPair(): {
+export function generateP256KeyPair(): {
   privateKey: Uint8Array;
   publicKey: Uint8Array;
   did: string;
@@ -76,7 +76,8 @@ function buildGenesisOperation(
   rotationKeyDid: string,
   signingKeyDid: string,
   role: 'researcher' | 'venue' | 'platform',
-  label: string
+  label: string,
+  opts: { handle?: string; service?: { type: string; endpoint: string } } = {}
 ): Record<string, unknown> {
   const serviceEndpoint = role === 'platform'
     ? 'https://didcal.io/platform'
@@ -90,16 +91,18 @@ function buildGenesisOperation(
     type: 'plc_operation',
     rotationKeys: [rotationKeyDid],
     verificationMethods: {
-      atproto: rotationKeyDid,
+      // The signing key is unique to this identity. The rotation key
+      // (which may be shared by a group of venues) only controls the DID.
+      atproto: signingKeyDid,
       'signing-1': signingKeyDid,
     },
-    alsoKnownAs: [`at://${label}.didcal.io`],
+    alsoKnownAs: [`at://${opts.handle ?? `${label}.didcal.io`}`],
     services: {
       atproto_pds: {
         type: 'AtprotoPersonalDataServer',
         endpoint: 'https://api.didcal.io',
       },
-      didcal: {
+      didcal: opts.service ?? {
         type: serviceType,
         endpoint: serviceEndpoint,
       },
@@ -176,13 +179,24 @@ async function publishToDirectory(
 export async function createIdentity(
   role: 'researcher' | 'venue' | 'platform',
   label: string,
-  options: { dryRun?: boolean } = {}
+  options: {
+    dryRun?: boolean;
+    /** Reuse an existing rotation key (raw secp256k1 private key) instead of generating one.
+     *  Used so one platform-held key can control a whole group of venue DIDs. */
+    rotationPrivateKey?: Uint8Array;
+    /** Handle placed in alsoKnownAs, e.g. 'scn.journal.didcal.io'. */
+    handle?: string;
+    /** Custom DIDcal service entry, e.g. { type: 'DIDcalVenue', endpoint: 'https://didcal.io/journals' }. */
+    service?: { type: string; endpoint: string };
+  } = {}
 ): Promise<Identity> {
-  // 1. Generate secp256k1 rotation keypair
-  const rotationKeyPair = await atprotoCrypto.Secp256k1Keypair.create({ exportable: true });
+  // 1. Rotation keypair: reuse the given one, or generate a new one
+  const rotationKeyPair = options.rotationPrivateKey
+    ? await atprotoCrypto.Secp256k1Keypair.import(options.rotationPrivateKey, { exportable: true })
+    : await atprotoCrypto.Secp256k1Keypair.create({ exportable: true });
   const rotationPrivateKeyBytes = await rotationKeyPair.export();
 
-  // 2. Generate P-256 signing keypair
+  // 2. Generate P-256 signing keypair (always unique per identity)
   const signingKey = generateP256KeyPair();
 
   // 3. Build unsigned genesis operation
@@ -190,7 +204,8 @@ export async function createIdentity(
     rotationKeyPair.did(),
     signingKey.did,
     role,
-    label
+    label,
+    { handle: options.handle, service: options.service }
   );
 
   // 4. Sign and derive DID

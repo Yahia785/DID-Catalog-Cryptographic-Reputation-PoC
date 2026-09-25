@@ -89,8 +89,10 @@ async function main() {
   for (let i = 0; i < logAfter.length; i++) {
     const entry = logAfter[i] as Record<string, unknown>;
     const createdAt = entry.createdAt as string;
-    const rotationKeys = entry.rotationKeys as string[];
-    const isGenesis = entry.prev === null;
+    // plc.directory nests the operation fields under `operation`
+    const op = (entry.operation ?? {}) as Record<string, unknown>;
+    const rotationKeys = op.rotationKeys as string[];
+    const isGenesis = op.prev === null;
     console.log(chalk.gray(`    [${i + 1}] ${isGenesis ? 'GENESIS' : 'UPDATE '} at ${createdAt}`));
     console.log(chalk.gray(`        rotationKeys: ${rotationKeys?.[0]?.slice(0, 30)}...`));
   }

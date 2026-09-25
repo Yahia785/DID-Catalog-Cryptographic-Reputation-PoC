@@ -2,30 +2,9 @@ import chalk from 'chalk';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createIdentity } from '../src/identity/create-identity.js';
+import { serializeIdentity } from '../src/identity/identity-store.js';
 
 const OUTPUT = path.resolve('output');
-
-/**
- * Serialize an Identity object to a JSON-safe format (hex-encode keys).
- */
-function serializeIdentity(identity: Awaited<ReturnType<typeof createIdentity>>) {
-  return {
-    did: identity.did,
-    role: identity.role,
-    rotationKeyPair: {
-      did: identity.rotationKeyPair.did,
-      publicKey: Buffer.from(identity.rotationKeyPair.publicKey).toString('hex'),
-      privateKey: Buffer.from(identity.rotationKeyPair.privateKey).toString('hex'),
-    },
-    signingKeyPair: {
-      did: identity.signingKeyPair.did,
-      publicKey: Buffer.from(identity.signingKeyPair.publicKey).toString('hex'),
-      privateKey: Buffer.from(identity.signingKeyPair.privateKey).toString('hex'),
-    },
-    plcOperation: identity.plcOperation,
-    plcDirectoryUrl: `https://plc.directory/${identity.did}`,
-  };
-}
 
 async function main() {
   console.log(chalk.bold('\n=== DIDcal Demo: Identity Creation ===\n'));

@@ -137,7 +137,7 @@ function extractSigningKey(op: Record<string, unknown>): string | null {
  * The update preserves all other DID document fields (services,
  * alsoKnownAs) and only changes:
  *   - rotationKeys → venue's new rotation key
- *   - verificationMethods.atproto → venue's new rotation key
+ *   - verificationMethods.atproto → the venue's signing key
  *   - prev → CID of the current (most recent) operation
  *
  * The signing key (verificationMethods.signing-1) can optionally
@@ -162,7 +162,7 @@ function buildUpdateOperation(
     type: 'plc_operation',
     rotationKeys: [newRotationKeyDid],
     verificationMethods: {
-      atproto: newRotationKeyDid,
+      atproto: signingKey,
       'signing-1': signingKey,
     },
     alsoKnownAs: currentOp.alsoKnownAs ?? [],

@@ -4,14 +4,15 @@
   "type": "module",
   "scripts": {
     "verify": "tsx src/shared/verify-setup.ts",
-
-    "demo": "tsx demo/full-demo.ts",
-    "demo:dry": "tsx demo/full-demo.ts --dry-run",
+    "setup:venues": "tsx demo/setup-venues.ts",
+    "setup:venues:dry": "tsx demo/setup-venues.ts --dry-run",
     "demo:identity": "tsx demo/demo-identity.ts",
+    "demo:claim": "tsx demo/demo-claim.ts",
+    "snapshot": "tsx src/scoring/snapshot.ts",
     "demo:score": "tsx demo/demo-score.ts",
     "demo:verify": "tsx demo/demo-verify.ts",
-    "demo:claim": "tsx demo/demo-claim.ts",
-
+    "demo:tamper": "tsx demo/demo-tamper.ts",
+    "demo": "tsx demo/full-demo.ts",
     "phase2": "tsx src/identity/verify-identity.ts",
     "phase2:dry": "tsx src/identity/verify-identity.ts --dry-run"
   },
@@ -20,6 +21,7 @@
     "@ipld/dag-cbor": "^10.0.2",
     "@noble/hashes": "^2.3.0",
     "chalk": "^6.0.0",
+    "did-jwt": "^8.0.18",
     "did-jwt-vc": "^4.0.16",
     "did-resolver": "^5.0.1",
     "multiformats": "^14.0.5"

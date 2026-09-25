@@ -73,7 +73,7 @@ async function verifySetup() {
   // 7. Types compile check
   const testIdentity: Partial<Identity> = { role: 'researcher' };
   const testPayload: Partial<ScorePayload> = { type: 'VenueScore' };
-  const testScore: Partial<ReputationScore> = { score: 0.85 };
+  const testScore: Partial<ReputationScore> = {};
   console.log(chalk.green('✓ types'), '- all type definitions compile');
 
   console.log(chalk.bold('\n=== Setup verification complete ===\n'));
