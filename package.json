@@ -9,6 +9,7 @@
     "demo:identity": "tsx demo/demo-identity.ts",
     "demo:claim": "tsx demo/demo-claim.ts",
     "snapshot": "tsx src/scoring/snapshot.ts",
+    "score": "tsx src/scoring/score-all.ts",
     "demo:score": "tsx demo/demo-score.ts",
     "demo:verify": "tsx demo/demo-verify.ts",
     "demo:tamper": "tsx demo/demo-tamper.ts",

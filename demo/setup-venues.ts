@@ -3,9 +3,10 @@ import path from 'node:path';
 import { createIdentity } from '../src/identity/create-identity.js';
 import { loadOrCreateControlKeys, CONTROL_KEYS_FILE } from '../src/identity/key-store.js';
 import {
-  PLATFORM_FILE, loadJson, saveJson, serializeIdentity, serializeKeyPair, type SerializedKeyPair,
+  PLATFORM_FILE, loadJson, saveJson, serializeIdentity, serializeKeyPair,
 } from '../src/identity/identity-store.js';
 import { VENUES, handleOf, groupOf } from '../src/venues/registry.js';
+import { VENUES_FILE, type VenueRecord } from '../src/venues/venue-records.js';
 import type { VenueType } from '../src/shared/types.js';
 
 /**
@@ -17,22 +18,6 @@ import type { VenueType } from '../src/shared/types.js';
  * Safe to run again: anything that already exists is reused, not recreated.
  * Use --dry-run to build everything locally without publishing to plc.directory.
  */
-
-export const VENUES_FILE = path.resolve('output/venues.json');
-
-export interface VenueRecord {
-  key: string;
-  name: string;
-  did: string;
-  type: VenueType;
-  handle: string;
-  controlKeyDid: string;       // group key that controls this DID until it is claimed
-  signingKeyPair: SerializedKeyPair;
-  published: boolean;
-  createdAt: string;
-  plcDirectoryUrl: string;
-  plcOperation?: object;
-}
 
 const dryRun = process.argv.includes('--dry-run');
 
