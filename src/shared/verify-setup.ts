@@ -71,7 +71,7 @@ async function verifySetup() {
   console.log(chalk.green('✓ chalk'), '- terminal colors working');
 
   // 7. Types compile check
-  const testIdentity: Partial<Identity> = { role: 'researcher' };
+  const testIdentity: Partial<Identity> = { role: 'venue' };
   const testPayload: Partial<ScorePayload> = { type: 'VenueScore' };
   const testScore: Partial<ReputationScore> = {};
   console.log(chalk.green('✓ types'), '- all type definitions compile');

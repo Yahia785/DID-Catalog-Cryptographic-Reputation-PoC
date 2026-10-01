@@ -58,7 +58,7 @@ function detail(key: string) {
   const src = (id: string) => m.sources.find((x) => x.id === id);
   const srcLine = (id: string) => {
     const x = src(id);
-    return x ? chalk.gray(`source: ${x.name}${x.edition ? ` (${x.edition})` : ''} · ${x.file} · sha256 ${x.sha256.slice(0, 12)}…`) : chalk.gray(`source: ${id} (not in snapshot)`);
+    return x ? chalk.gray(`source: ${x.name}${x.edition ? ` (${x.edition})` : ''} · ${x.file}`) : chalk.gray(`source: ${id} (not in snapshot)`);
   };
   const series = (prefix: string) => m.inputs.filter((i) => i.metric.startsWith(`${prefix}.`)).map((i) => `${i.metric.slice(prefix.length + 1)}:${i.value ?? '—'}`).join(' ');
 

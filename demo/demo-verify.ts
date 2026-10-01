@@ -35,7 +35,7 @@ async function main() {
       if (!r.ok) failed++;
       console.log(`  ${r.ok ? chalk.green('✓') : chalk.red('✗')} ${v.key.padEnd(9)} ${r.checks.map((c) => icon[c.status]).join(' ')}  ${chalk.gray(r.checks.filter((c) => c.status !== 'pass').map((c) => c.name).join(', '))}`);
     }
-    console.log(chalk.gray('\n  checks: signature · identities · snapshot hashes · inputs · recompute · freshness'));
+    console.log(chalk.gray('\n  checks: signature · identities · venue · recompute'));
     console.log(failed ? chalk.red(`\n${failed} credential(s) failed\n`) : chalk.green('\nAll credentials valid\n'));
     process.exit(failed ? 1 : 0);
   }

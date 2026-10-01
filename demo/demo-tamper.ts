@@ -1,7 +1,4 @@
 import chalk from 'chalk';
-import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
 import { loadPlatform } from '../src/identity/identity-store.js';
 import { computeScore } from '../src/scoring/compute-score.js';
 import { issueScore } from '../src/scoring/issue-score.js';
@@ -58,38 +55,15 @@ async function main() {
     const re = computeScore(original.manifest.venueType, inputs);
     const payload = { ...original.subject, score: re.score, breakdown: re.breakdown, confidence: re.confidence, flags: re.flags };
     const vc = await issueScore(platform, { payload, manifest: { ...original.manifest, inputs } });
-    printReport(await verifyScoreJwt(vc.jwt, { offline }),
-      `4. The platform signs a score computed as if ${venue.key} had 0 retractions (real: ${retr.value})`);
-  }
-
-  // 5. Someone edits the snapshot file after the score was signed
-  {
-    const srcDir = path.dirname(path.resolve(original.manifest.sources[0].file));
-    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'didcal-tamper-'));
-    for (const f of fs.readdirSync(srcDir)) fs.copyFileSync(path.join(srcDir, f), path.join(tmp, f));
-    const rwFile = path.join(tmp, 'retraction-watch.json');
-    const rw = JSON.parse(fs.readFileSync(rwFile, 'utf8'));
-    if (rw.venues[venue.key]) rw.venues[venue.key].retractions = 0;
-    fs.writeFileSync(rwFile, JSON.stringify(rw, null, 2));
-    printReport(await verifyScoreJwt(original.jwt, { offline, snapshotDirOverride: tmp }),
-      '5. The snapshot file is edited afterwards (retractions set to 0)');
-    fs.rmSync(tmp, { recursive: true, force: true });
-  }
-
-  // 6. Old data
-  {
-    const in60 = new Date(Date.now() + 60 * 86_400_000);
-    printReport(await verifyScoreJwt(original.jwt, { offline, now: in60 }),
-      '6. The same credential checked 60 days from now');
+    console.log(chalk.yellow.bold(`\n4. The platform lies about the input data (not caught yet: needs present-time verification)`));
+    console.log(chalk.gray(`   claims 0 retractions for ${venue.key}, real value is ${retr.value}`));
+    printReport(await verifyScoreJwt(vc.jwt, { offline }));
   }
 
   console.log(chalk.bold('\nSummary'));
   console.log('  2  outsider edits the credential        → caught by the signature');
   console.log('  3  platform signs a score that does not follow from its inputs → caught by recomputation');
-  console.log('  4  platform lies about the input data  → caught by checking inputs against the snapshot');
-  console.log('  5  snapshot file edited later           → caught by the SHA-256 hashes');
-  console.log('  6  data too old                         → flagged as a warning (score still authentic)');
-  console.log(chalk.gray('\n  Scenario 4 relies on the verifier having the same snapshot files, which is why snapshots must be published.\n'));
+  console.log('  4  platform lies about the input data   → open until present-time verification');
 }
 
 main().catch((e) => { console.error(chalk.red(e instanceof Error ? e.message : e)); process.exit(1); });

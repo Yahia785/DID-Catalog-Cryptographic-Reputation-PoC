@@ -2,7 +2,6 @@ import chalk from 'chalk';
 import fs from 'node:fs';
 import path from 'node:path';
 import { readCsv } from '../shared/csv.js';
-import { sha256File } from '../shared/hash.js';
 import { buildUrl, getJson, mailto } from '../shared/http.js';
 import { VENUES, type VenueEntry } from '../venues/registry.js';
 import {
@@ -50,7 +49,7 @@ function write<K extends SourceId>(id: K, source: SourceInfo, venues: Record<str
 }
 
 function csvSource(id: SourceId, name: string, url: string, file: string, edition?: string): SourceInfo {
-  return { id, name, access: 'csv', url, edition, retrievedAt: fs.statSync(file).mtime.toISOString(), inputFile: file, inputSha256: sha256File(file) };
+  return { id, name, access: 'csv', url, edition, retrievedAt: fs.statSync(file).mtime.toISOString(), inputFile: file };
 }
 
 // ── ICORE (conferences) ──────────────────────────────────────
@@ -189,7 +188,7 @@ async function main() {
   }
   const index = writeIndex(DIR);
   console.log(chalk.bold('\nSnapshot index'));
-  for (const f of index.files) console.log(`  ${f.id.padEnd(17)} sha256 ${f.sha256.slice(0, 16)}…  ${chalk.gray(f.file)}`);
+  for (const f of index.files) console.log(`  ${f.id.padEnd(17)} ${chalk.gray(f.file)}`);
   console.log(chalk.gray(`\nSaved ${rel(path.join(DIR, 'index.json'))}. Next: npm run score\n`));
 }
 

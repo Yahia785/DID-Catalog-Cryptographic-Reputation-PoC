@@ -1,14 +1,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { sha256File } from '../shared/hash.js';
 
 /**
  * A snapshot is a folder of JSON files, one per data source, frozen at one
  * point in time: data/snapshots/<YYYY-MM-DD>/.
  *
  * Scoring and verification read ONLY these files, never live APIs, so anyone
- * with the same files gets the same score. Each file's SHA-256 goes into the
- * provenance manifest; a verifier re-hashes the file to prove nothing changed.
+ * with the same files gets the same score.
  */
 
 export const SNAPSHOTS_ROOT = path.resolve('data/snapshots');
@@ -24,7 +22,6 @@ export interface SourceInfo {
   edition?: string;
   retrievedAt: string;
   inputFile?: string;     // for CSV sources: the downloaded file that was read
-  inputSha256?: string;   // hash of that downloaded file
 }
 
 // Per-venue data from each source. null = the venue is not in that source.
@@ -46,7 +43,7 @@ export interface SnapshotFile<T> {
   venues: Record<string, T | null>;        // keyed by registry key, e.g. 'SCN'
 }
 
-export interface SnapshotIndexEntry { id: SourceId; file: string; sha256: string }
+export interface SnapshotIndexEntry { id: SourceId; file: string }
 export interface SnapshotIndex { createdAt: string; dir: string; files: SnapshotIndexEntry[] }
 
 export interface Snapshot {
@@ -83,7 +80,7 @@ export function writeIndex(dir: string): SnapshotIndex {
   const files: SnapshotIndexEntry[] = [];
   for (const id of ALL_SOURCES) {
     const f = fileFor(dir, id);
-    if (fs.existsSync(f)) files.push({ id, file: rel(f), sha256: sha256File(f) });
+    if (fs.existsSync(f)) files.push({ id, file: rel(f) });
   }
   const index: SnapshotIndex = { createdAt: new Date().toISOString(), dir: rel(dir), files };
   fs.writeFileSync(path.join(dir, 'index.json'), JSON.stringify(index, null, 2));

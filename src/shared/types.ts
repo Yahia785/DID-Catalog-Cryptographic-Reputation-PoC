@@ -5,8 +5,7 @@ export type VenueType = 'conference' | 'journal';
 // ─── Provenance ──────────────────────────────────────────────
 
 /**
- * One source file in a data snapshot. The verifier re-hashes the file
- * and compares it to sha256 to prove the inputs were not changed.
+ * One source file in a data snapshot, named by the inputs that came from it.
  */
 export interface SourceSnapshot {
   id: string;               // short id used by inputs, e.g. 'openalex'
@@ -16,7 +15,6 @@ export interface SourceSnapshot {
   url: string;              // where the data came from
   retrievedAt: string;      // ISO timestamp
   file: string;             // snapshot file path, relative to the project
-  sha256: string;           // hash of that file
 }
 
 /** One raw value fed into the formula, with the source it came from. */
@@ -93,27 +91,8 @@ export interface KeyPair {
 
 export interface Identity {
   did: string;
-  role: 'researcher' | 'venue' | 'platform';
+  role: 'venue' | 'platform';
   rotationKeyPair: KeyPair;  // controls the DID (may be shared by a group)
   signingKeyPair: KeyPair;   // unique to this identity
   plcOperation?: object;
-}
-
-// ─── Verification ────────────────────────────────────────────
-
-export interface ScoreVerificationResult {
-  signatureValid: boolean;
-  hashesValid: boolean;
-  recomputeMatch: boolean;
-  claimedScore: number | null;
-  recomputedScore: number | null;
-  staleSources: string[];
-  errors: string[];
-}
-
-export interface ThreatResult {
-  scenario: string;
-  description: string;
-  detected: boolean;
-  details: string;
 }

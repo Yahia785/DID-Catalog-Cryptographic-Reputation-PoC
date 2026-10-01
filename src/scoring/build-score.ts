@@ -34,7 +34,7 @@ export function buildInputs(venue: VenueEntry, snap: Snapshot): InputValue[] {
   return inputs;
 }
 
-/** Only the snapshot files this venue's inputs came from, with their hashes. */
+/** Only the snapshot files this venue's inputs came from. */
 export function sourcesFor(inputs: InputValue[], snap: Snapshot): SourceSnapshot[] {
   const used = new Set(inputs.map((i) => i.sourceId));
   return snap.index.files
@@ -43,7 +43,7 @@ export function sourcesFor(inputs: InputValue[], snap: Snapshot): SourceSnapshot
       const info = snap.sources[f.id]!.source;
       return {
         id: f.id, name: info.name, access: info.access, edition: info.edition,
-        url: info.url, retrievedAt: info.retrievedAt, file: f.file, sha256: f.sha256,
+        url: info.url, retrievedAt: info.retrievedAt, file: f.file,
       };
     });
 }

@@ -68,14 +68,14 @@ export function generateP256KeyPair(): {
  * Build the PLC genesis operation object (without signature).
  * Follows PLC spec v0.3.0.
  *
- * The 'platform' role uses the same structure as venue/researcher
+ * The 'platform' role uses the same structure as venue
  * but with a distinct service endpoint identifying it as the
  * DIDcal scoring platform.
  */
 function buildGenesisOperation(
   rotationKeyDid: string,
   signingKeyDid: string,
-  role: 'researcher' | 'venue' | 'platform',
+  role: 'venue' | 'platform',
   label: string,
   opts: { handle?: string; service?: { type: string; endpoint: string } } = {}
 ): Record<string, unknown> {
@@ -171,13 +171,13 @@ async function publishToDirectory(
 }
 
 /**
- * Create a DID:PLC identity for a researcher, venue, or platform.
+ * Create a DID:PLC identity for a venue or platform.
  *
  * Generates both keypairs locally, builds and signs the PLC genesis operation,
  * optionally publishes to plc.directory, and returns the full identity object.
  */
 export async function createIdentity(
-  role: 'researcher' | 'venue' | 'platform',
+  role: 'venue' | 'platform',
   label: string,
   options: {
     dryRun?: boolean;
