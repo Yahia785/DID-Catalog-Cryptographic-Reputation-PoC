@@ -3,7 +3,6 @@ import * as dagCbor from '@ipld/dag-cbor';
 import { CID } from 'multiformats/cid';
 import { base32 } from 'multiformats/bases/base32';
 import crypto from 'node:crypto';
-import type { Identity } from '../shared/types.js';
 
 // ─── CID computation ─────────────────────────────────────────
 
@@ -225,38 +224,57 @@ export interface ClaimResult {
   newRotationKeyDid: string;
   newSigningKeyDid: string | null;
   updateOperation: Record<string, unknown>;
-  venueIdentity: Identity;
+}
+
+/** Make sure a string is a well-formed did:key before it is embedded in a signed PLC operation. */
+function assertValidDidKey(didKey: string, label: string): void {
+  try {
+    atprotoCrypto.parseMultikey(atprotoCrypto.extractMultikey(didKey));
+  } catch (e) {
+    throw new Error(`${label} is not a valid did:key: ${e instanceof Error ? e.message : String(e)}`);
+  }
 }
 
 /**
  * Claim a venue DID by performing key rotation.
  *
- * This is the core trust-transfer operation in DIDcal:
- * 1. Fetch the venue's current PLC operation from plc.directory
- * 2. Generate new keypairs for the venue
- * 3. Build an update operation that replaces the platform's
- *    rotation key with the venue's new key
- * 4. Sign the update with the platform's current rotation key
- *    (proving the platform authorized the transfer)
- * 5. Publish the update to plc.directory
+ * This is the core trust-transfer operation in DIDcal. The venue generates
+ * its OWN keypairs locally and never hands the private keys to the platform:
+ * it sends only the public did:key values (newRotationKeyDid, and optionally
+ * newSigningKeyDid). The platform then:
+ * 1. Fetches the venue's current PLC operation from plc.directory
+ * 2. Builds an update operation naming the venue's new rotation key (and,
+ *    if given, its new signing key — otherwise the current signing key
+ *    carries over unchanged)
+ * 3. Signs the update with the platform's CURRENT rotation key, proving
+ *    the platform authorized the handover
+ * 4. Publishes the update to plc.directory
  *
  * After this operation:
  *   - The platform can NO LONGER modify the venue's DID
- *   - Only the venue's new rotation key can sign future updates
+ *   - Only the venue's own rotation key can sign future updates
  *   - The audit log records both operations with timestamps
  *   - Anyone can verify the transfer by inspecting the log
  *
  * @param venueDid - The DID to claim
- * @param platformRotationPrivateKey - The platform's current rotation private key (raw bytes)
- * @param options.rotateSigningKey - Also generate a new signing key (default: true)
- * @param options.dryRun - Build but don't publish the update (default: false)
+ * @param platformRotationPrivateKey - The platform's (or group's) current rotation private key (raw bytes)
+ * @param options.newRotationKeyDid - The venue's new rotation public key, as a did:key (required)
+ * @param options.newSigningKeyDid - The venue's new signing public key, as a did:key (optional; the current signing key is kept if omitted)
+ * @param options.dryRun - Build but don't publish the update (not currently supported)
  */
 export async function claimVenue(
   venueDid: string,
   platformRotationPrivateKey: Uint8Array,
-  options: { rotateSigningKey?: boolean; dryRun?: boolean } = {}
+  options: { newRotationKeyDid: string; newSigningKeyDid?: string; dryRun?: boolean }
 ): Promise<ClaimResult> {
-  const rotateSigningKey = options.rotateSigningKey ?? true;
+  assertValidDidKey(options.newRotationKeyDid, 'newRotationKeyDid');
+  if (options.newSigningKeyDid) assertValidDidKey(options.newSigningKeyDid, 'newSigningKeyDid');
+
+  if (options.dryRun) {
+    // In dry run, we can't fetch from plc.directory since the DID
+    // may not be published. Use a placeholder.
+    throw new Error('Dry run not supported for claimVenue — the DID must be published to plc.directory first');
+  }
 
   // 1. Reconstruct the platform's rotation keypair from private key
   const platformRotationKeyPair = await atprotoCrypto.Secp256k1Keypair.import(
@@ -266,103 +284,37 @@ export async function claimVenue(
   const previousRotationKeyDid = platformRotationKeyPair.did();
 
   // 2. Fetch current operation from plc.directory
-  let currentAuditEntry: Record<string, unknown>;
-  let currentOp: Record<string, unknown>;
-  let prevCid: string;
-
-  if (options.dryRun) {
-    // In dry run, we can't fetch from plc.directory since the DID
-    // may not be published. Use a placeholder.
-    throw new Error('Dry run not supported for claimVenue — the DID must be published to plc.directory first');
-  }
-
-  currentAuditEntry = await fetchCurrentOperation(venueDid);
-  currentOp = extractOperationFields(currentAuditEntry);
+  const currentAuditEntry = await fetchCurrentOperation(venueDid);
+  const currentOp = extractOperationFields(currentAuditEntry);
 
   // Use the CID that plc.directory computed for this operation.
   // plc.directory includes a 'cid' field in each audit log entry.
   // Using it directly avoids CID mismatches from field ordering
   // differences in our DAG-CBOR encoding vs. theirs.
-  if (typeof currentAuditEntry.cid === 'string') {
-    prevCid = currentAuditEntry.cid;
-  } else {
-    // Fallback: compute it ourselves (may not match plc.directory)
-    prevCid = computeOperationCID(currentOp);
-  }
+  const prevCid = typeof currentAuditEntry.cid === 'string'
+    ? currentAuditEntry.cid
+    : computeOperationCID(currentOp); // fallback: compute it ourselves (may not match plc.directory)
 
-  // 3. Generate new rotation keypair for the venue
-  const newRotationKeyPair = await atprotoCrypto.Secp256k1Keypair.create({ exportable: true });
-  const newRotationPrivateKeyBytes = await newRotationKeyPair.export();
-
-  // 4. Optionally generate new signing keypair
-  let newSigningKeyDid: string | null = null;
-  let signingKeyPrivate: Uint8Array | undefined;
-  let signingKeyPublic: Uint8Array | undefined;
-  let signingKeyDidKey: string | undefined;
-
-  if (rotateSigningKey) {
-    // Generate P-256 signing key (same as in create-identity)
-    const keyObj = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
-    const jwk = keyObj.privateKey.export({ format: 'jwk' });
-    signingKeyPrivate = new Uint8Array(Buffer.from(jwk.d as string, 'base64url'));
-    const derPub = keyObj.publicKey.export({ format: 'der', type: 'spki' });
-    const rawPubUncompressed = Buffer.from(derPub).subarray(26);
-    // Compress
-    const x = rawPubUncompressed.subarray(1, 33);
-    const y = rawPubUncompressed.subarray(33, 65);
-    const prefix = (y[31] & 1) === 0 ? 0x02 : 0x03;
-    signingKeyPublic = new Uint8Array(Buffer.concat([Buffer.from([prefix]), x]));
-    // Encode as did:key
-    const P256_MULTICODEC_PREFIX = new Uint8Array([0x80, 0x24]);
-    const multicodecBytes = new Uint8Array(P256_MULTICODEC_PREFIX.length + signingKeyPublic.length);
-    multicodecBytes.set(P256_MULTICODEC_PREFIX);
-    multicodecBytes.set(signingKeyPublic, P256_MULTICODEC_PREFIX.length);
-    const { base58btc } = await import('multiformats/bases/base58');
-    signingKeyDidKey = `did:key:${base58btc.encode(multicodecBytes)}`;
-    newSigningKeyDid = signingKeyDidKey;
-  }
-
-  // 5. Build the update operation
+  // 3. Build the update operation, naming the venue's own keys
   const unsignedUpdate = buildUpdateOperation(
     currentOp,
     prevCid,
-    newRotationKeyPair.did(),
-    newSigningKeyDid ?? undefined
+    options.newRotationKeyDid,
+    options.newSigningKeyDid
   );
 
-  // 6. Sign with the platform's current rotation key
+  // 4. Sign with the platform's current rotation key
   const signedUpdate = await signUpdateOperation(unsignedUpdate, platformRotationKeyPair);
 
-  // 7. Publish to plc.directory
+  // 5. Publish to plc.directory
   await publishUpdate(venueDid, signedUpdate);
-
-  // 8. Build the venue's new identity object
-  const venueIdentity: Identity = {
-    did: venueDid,
-    role: 'venue',
-    rotationKeyPair: {
-      privateKey: new Uint8Array(newRotationPrivateKeyBytes),
-      publicKey: new Uint8Array(
-        atprotoCrypto.parseMultikey(
-          atprotoCrypto.extractMultikey(newRotationKeyPair.did())
-        ).keyBytes
-      ),
-      did: newRotationKeyPair.did(),
-    },
-    signingKeyPair: {
-      privateKey: signingKeyPrivate ?? new Uint8Array(0),
-      publicKey: signingKeyPublic ?? new Uint8Array(0),
-      did: signingKeyDidKey ?? '',
-    },
-  };
 
   return {
     did: venueDid,
     previousRotationKeyDid,
-    newRotationKeyDid: newRotationKeyPair.did(),
-    newSigningKeyDid,
+    newRotationKeyDid: options.newRotationKeyDid,
+    newSigningKeyDid: options.newSigningKeyDid ?? null,
     updateOperation: signedUpdate,
-    venueIdentity,
   };
 }
 
