@@ -5,7 +5,7 @@ import readline from 'node:readline/promises';
 /**
  * npm run demo               the whole story, pausing between steps (press Enter)
  * npm run demo -- --no-pause run straight through
- * Add --offline to skip resolving the platform DID on plc.directory.
+ * Add --offline to read the cached audit logs (npm run cache:plc) instead of plc.directory.
  *
  * Assumes setup:venues, snapshot and score have already been run.
  */

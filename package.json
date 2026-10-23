@@ -12,6 +12,9 @@
     "demo:score": "tsx demo/demo-score.ts",
     "demo:verify": "tsx demo/demo-verify.ts",
     "demo:tamper": "tsx demo/demo-tamper.ts",
+    "bench": "tsx src/bench/measure.ts",
+    "test": "tsx --test test/*.test.ts",
+    "cache:plc": "tsx src/identity/cache-plc.ts",
     "demo": "tsx demo/full-demo.ts"
   },
   "dependencies": {

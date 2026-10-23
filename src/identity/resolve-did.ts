@@ -34,7 +34,7 @@ export async function resolveDID(did: string): Promise<ResolvedDIDDocument> {
 /**
  * Fetch the full PLC operation log (audit trail) for a DID.
  */
-export async function getAuditLog(did: string): Promise<Array<Record<string, unknown>>> {
+export async function getAuditLog(did: string): Promise<AuditEntry[]> {
   const url = `https://plc.directory/${did}/log/audit`;
   const response = await fetch(url, {
     headers: { Accept: 'application/json' },
@@ -45,5 +45,28 @@ export async function getAuditLog(did: string): Promise<Array<Record<string, unk
     throw new Error(`Audit log fetch failed (${response.status}): ${body}`);
   }
 
-  return (await response.json()) as Array<Record<string, unknown>>;
+  return (await response.json()) as AuditEntry[];
 }
+
+/** One entry of a plc.directory audit log (/log/audit). `local` marks entries built from a saved genesis op, never fetched. */
+export interface AuditEntry {
+  did: string;
+  operation: {
+    type?: string;
+    verificationMethods?: Record<string, string>;
+    alsoKnownAs?: string[];
+    [k: string]: unknown;
+  };
+  cid: string;
+  nullified: boolean;
+  createdAt: string;
+  local?: boolean;
+}
+
+/** Where a verifier gets a DID's operation history from. `via` is shown in check details. */
+export interface DidResolver {
+  via: string;
+  auditLog(did: string): Promise<AuditEntry[]>;
+}
+
+export const onlineResolver: DidResolver = { via: 'plc.directory', auditLog: getAuditLog };

@@ -139,3 +139,12 @@ export function computeScore(type: VenueType, inputs: InputValue[]): ComputedSco
     explain: { standing: st.text, impact: im.text, stability: stab.text, integrity: integ.text, score: scoreText },
   };
 }
+
+/**
+ * Every formula version ever used to sign a credential. A verifier looks the
+ * credential's formulaVersion up here; an unknown version cannot be checked.
+ * Old versions stay in the registry so old credentials remain verifiable.
+ */
+export const FORMULAS: Record<string, { description: string; compute: (type: VenueType, inputs: InputValue[]) => ComputedScore }> = {
+  [FORMULA_VERSION]: { description: FORMULA_DESCRIPTION, compute: computeScore },
+};

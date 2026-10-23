@@ -1,14 +1,14 @@
 import chalk from 'chalk';
 import fs from 'node:fs';
 import { vcPathFor } from '../src/scoring/read-vc.js';
-import { verifyScoreJwt, type Check, type VerifyReport } from '../src/verification/verify-score.js';
+import { resolverFor, verifyScoreJwt, type Check, type VerifyReport } from '../src/verification/verify-score.js';
 import { VENUES, findVenue } from '../src/venues/registry.js';
 
 /**
  * npm run demo:verify -- SCN           verify one venue's signed score, step by step
  * npm run demo:verify -- --all         verify every venue (one line each)
  * npm run demo:verify -- --file=path   verify any score VC file (e.g. one someone sent you)
- * Add --offline to use the local platform key instead of resolving it on plc.directory.
+ * Add --offline to read the cached audit logs in output/plc-cache/ (see: npm run cache:plc) instead of plc.directory.
  */
 
 const icon: Record<Check['status'], string> = {
@@ -23,7 +23,7 @@ export function printReport(r: VerifyReport, title?: string) {
 }
 
 async function main() {
-  const offline = process.argv.includes('--offline');
+  const resolver = resolverFor(process.argv.includes('--offline'));
   const file = process.argv.find((a) => a.startsWith('--file='))?.split('=')[1];
 
   if (process.argv.includes('--all')) {
@@ -31,7 +31,7 @@ async function main() {
     let failed = 0;
     for (const v of VENUES) {
       if (!fs.existsSync(vcPathFor(v.slug))) continue;
-      const r = await verifyScoreJwt(fs.readFileSync(vcPathFor(v.slug), 'utf8'), { offline });
+      const r = await verifyScoreJwt(fs.readFileSync(vcPathFor(v.slug), 'utf8'), { resolver });
       if (!r.ok) failed++;
       console.log(`  ${r.ok ? chalk.green('✓') : chalk.red('✗')} ${v.key.padEnd(9)} ${r.checks.map((c) => icon[c.status]).join(' ')}  ${chalk.gray(r.checks.filter((c) => c.status !== 'pass').map((c) => c.name).join(', '))}`);
     }
@@ -48,7 +48,7 @@ async function main() {
     if (!venue) throw new Error(`Give a venue (${VENUES.map((v) => v.key).join(', ')}), --all, or --file=path`);
     jwt = fs.readFileSync(vcPathFor(venue.slug), 'utf8');
   }
-  const r = await verifyScoreJwt(jwt, { offline });
+  const r = await verifyScoreJwt(jwt, { resolver });
   printReport(r, 'Verifying score credential');
   console.log();
   process.exit(r.ok ? 0 : 1);

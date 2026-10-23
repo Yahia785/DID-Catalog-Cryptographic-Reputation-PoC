@@ -42,7 +42,7 @@ async function main() {
   // ── Step 2: Audit log before claiming ────────────────────────
   console.log(chalk.blue('Step 2: Audit log before claiming...'));
   const logBefore = await getAuditLog(venue.did);
-  const opBefore = (logBefore[logBefore.length - 1] as Record<string, unknown>).operation as Record<string, unknown>;
+  const opBefore = logBefore[logBefore.length - 1].operation as Record<string, unknown>;
   const rotationKeysBefore = opBefore.rotationKeys as string[];
   console.log(chalk.gray(`  ${logBefore.length} operation(s) in log (genesis only)`));
   console.log(chalk.gray(`    rotationKeys: ${JSON.stringify(rotationKeysBefore)}`));
@@ -81,7 +81,7 @@ async function main() {
   await new Promise((resolve) => setTimeout(resolve, 1000)); // let plc.directory propagate
 
   const logAfter = await getAuditLog(venue.did);
-  const opAfter = (logAfter[logAfter.length - 1] as Record<string, unknown>).operation as Record<string, unknown>;
+  const opAfter = logAfter[logAfter.length - 1].operation as Record<string, unknown>;
   const rotationKeysAfter = opAfter.rotationKeys as string[];
   console.log(chalk.gray(`  rotationKeys (from the audit log): ${JSON.stringify(rotationKeysAfter)}`));
   const rotationHandedOver = rotationKeysAfter.length === 1
