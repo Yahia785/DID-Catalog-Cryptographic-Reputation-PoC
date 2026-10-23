@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
+import { didCreateRun, parseDidCreate, printDidCreate } from './did-create.js';
 import type { AuditEntry, DidResolver } from '../identity/resolve-did.js';
 import { onlineResolver } from '../identity/resolve-did.js';
 import { issueScore } from '../scoring/issue-score.js';
@@ -28,6 +29,15 @@ import { VENUES, type VenueEntry } from '../venues/registry.js';
  *   network requests  how many HTTP requests issuing or verifying needs. Offline the DID
  *                     histories sit in memory, so the expected number is 0.
  *   throughput        credentials fully verified per second, on one core, back to back.
+ *   publishes/second  the write side: how many credentials the platform can compute and sign per
+ *                     second, one process, back to back (n / total time for all n). Blockchain
+ *                     papers report this as write throughput (transactions per second).
+ *   publish + write   the same per-credential work plus saving the .vc.jwt file to disk (a temp
+ *                     folder that is deleted afterwards), i.e. what a real publish step costs.
+ *   DID creation      (--did-create=N --yes, live) the cost of putting a new venue DID on
+ *                     plc.directory: build and sign the genesis operation, the POST, the wait
+ *                     until it resolves, and the bytes involved. It is paid ONCE per venue, not
+ *                     per score, and is our closest equivalent to a blockchain transaction.
  *   online mode       what verification costs when the DID audit logs must be fetched from
  *                     plc.directory: requests and bytes per verification, with no cache and
  *                     with each DID's log fetched once and reused.
@@ -37,6 +47,7 @@ import { VENUES, type VenueEntry } from '../venues/registry.js';
  *
  *   npm run bench                 offline, no network (synthetic venues, throwaway identities)
  *   npm run bench -- --repeat=5   offline, whole sweep 5 times, median of each metric across runs
+ *   npx tsx src/bench/measure.ts --did-create=2 --yes   publish 2 permanent throwaway DIDs (max 5)
  *   npm run bench -- --online     real credentials from output/scores/ against plc.directory
  */
 
@@ -47,6 +58,8 @@ const N_VALUES = [1, 10, 100, 1000];
 const WARMUP = 20;
 const ONLINE_CAP = 100;           // verifications in total over both online cases
 const ONLINE_MIN_GAP_MS = 200;    // between plc.directory requests
+let DID_CREATE: number | null = null; // set from --did-create=N; stays null (nothing is created) without it
+try { DID_CREATE = parseDidCreate(process.argv); } catch (e) { console.error(chalk.red(e instanceof Error ? e.message : e)); process.exit(1); }
 const REPEAT = Math.max(1, Number(process.argv.find((a) => a.startsWith('--repeat='))?.split('=')[1] ?? 1) || 1);
 
 interface Stats { mean: number; p50: number; p95: number }
@@ -173,6 +186,21 @@ async function offlineRun(platform: Identity, n: number) {
     jwts.push(vc.jwt);
   }
   const issueReq = net.requests - net0.requests;
+  const publishesPerSecond = n / (issueMs.reduce((a, b) => a + b, 0) / 1000);
+
+  // Publish = compute + sign + write the .vc.jwt file, into a temp folder (never output/scores/)
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'didcal-bench-'));
+  const publishWriteMs: number[] = [];
+  try {
+    for (const [i, v] of venues.entries()) {
+      const t = performance.now();
+      const vc = await issue(v);
+      fs.writeFileSync(path.join(tmp, i + '.vc.jwt'), vc.jwt);
+      publishWriteMs.push(performance.now() - t);
+    }
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 
   const verifyMs: number[] = [], sigMs: number[] = [], recMs: number[] = [];
   const net1 = { ...net };
@@ -194,7 +222,7 @@ async function offlineRun(platform: Identity, n: number) {
   const sizes = jwts.map((j) => Buffer.byteLength(j));
   return {
     n,
-    issueMs: stats(issueMs),
+    issueMs: stats(issueMs), publishesPerSecond, publishWriteMs: stats(publishWriteMs),
     verifyMs: stats(verifyMs), signatureMs: stats(sigMs), recomputeMs: stats(recMs),
     jwtBytes: { mean: sizes.reduce((a, b) => a + b, 0) / n, min: Math.min(...sizes), max: Math.max(...sizes), total: sizes.reduce((a, b) => a + b, 0) },
     requestsPerIssuance: issueReq / n,
@@ -282,6 +310,8 @@ function printOffline(rows: Awaited<ReturnType<typeof offlineRun>>[]) {
     line(`${name} p95 (ms)`, rows.map((r) => ms(pick(r).p95)));
   };
   triple('issue (compute+sign)', (r) => r.issueMs);
+  line('publishes per second', rows.map((r) => r.publishesPerSecond.toFixed(0)));
+  triple('publish (compute+sign+write)', (r) => r.publishWriteMs);
   triple('verify (all checks)', (r) => r.verifyMs);
   triple('  of which signature', (r) => r.signatureMs);
   triple('  of which recompute', (r) => r.recomputeMs);
@@ -311,9 +341,13 @@ function gitCommit() {
 }
 
 async function main() {
-  const mode = ONLINE ? 'online' : 'offline';
+  const mode = DID_CREATE ? 'did-create' : ONLINE ? 'online' : 'offline';
   const result: Record<string, unknown> = {};
-  if (ONLINE) {
+  if (DID_CREATE) {
+    const d = await didCreateRun(DID_CREATE, process.argv.includes('--yes'));
+    printDidCreate(d);
+    result.didCreate = d;
+  } else if (ONLINE) {
     const o = await onlineRun();
     printOnline(o);
     result.online = o;
@@ -332,7 +366,7 @@ async function main() {
     if (REPEAT > 1) result.offlineRuns = runs;
   }
   const meta = {
-    mode, repeat: ONLINE ? null : REPEAT, nValues: ONLINE ? null : N_VALUES, warmup: ONLINE ? null : WARMUP, timestamp: new Date().toISOString(),
+    mode, repeat: mode === 'offline' ? REPEAT : null, nValues: mode === 'offline' ? N_VALUES : null, warmup: mode === 'offline' ? WARMUP : null, timestamp: new Date().toISOString(),
     node: process.version, cpu: os.cpus()[0]?.model ?? 'unknown', cpuCount: os.cpus().length,
     os: `${os.type()} ${os.release()} (${os.platform()} ${os.arch()})`, gitCommit: gitCommit(),
   };
