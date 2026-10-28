@@ -12,6 +12,8 @@
     "demo:score": "tsx demo/demo-score.ts",
     "demo:verify": "tsx demo/demo-verify.ts",
     "demo:tamper": "tsx demo/demo-tamper.ts",
+    "data:check": "tsx src/scoring/data-check.ts",
+    "sample:select": "tsx src/venues/select-sample.ts",
     "bench": "tsx src/bench/measure.ts",
     "test": "tsx --test test/*.test.ts",
     "cache:plc": "tsx src/identity/cache-plc.ts",

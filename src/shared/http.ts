@@ -4,6 +4,10 @@
  * sends an HTML page instead of data, or drops the connection.
  */
 
+// Load .env (OPENALEX_API_KEY, DIDCAL_MAILTO, S2_API_KEY) before anything reads process.env.
+// Modules that import this file run their own top-level code after it, so they see the values too.
+try { process.loadEnvFile('.env'); } catch {}
+
 const MAILTO = process.env.DIDCAL_MAILTO ?? '';
 const S2_KEY = process.env.S2_API_KEY ?? '';
 
