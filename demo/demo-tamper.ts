@@ -1,8 +1,9 @@
 import chalk from 'chalk';
 import { loadPlatform } from '../src/identity/identity-store.js';
-import { computeScore } from '../src/scoring/compute-score.js';
+import path from 'node:path';
+import { FORMULAS } from '../src/scoring/compute-score.js';
 import { issueScore } from '../src/scoring/issue-score.js';
-import { readScoreVC } from '../src/scoring/read-vc.js';
+import { SCORES_DIR, readScoreVC } from '../src/scoring/read-vc.js';
 import { resolverFor, verifyScoreJwt } from '../src/verification/verify-score.js';
 import { findVenue } from '../src/venues/registry.js';
 import { printReport } from './demo-verify.js';
@@ -10,18 +11,21 @@ import { printReport } from './demo-verify.js';
 /**
  * npm run demo:tamper            (default venue: SCN)
  * npm run demo:tamper -- CIN
+ * npm run demo:tamper -- SCN --dir=output/scores/f1     (formula 1.0 credentials)
  *
  * Attack scenarios against a real signed score, and which check catches each.
  * Nothing on disk is modified: every tampered copy lives in memory or a temp folder.
  */
 
+const DIR = path.resolve(process.argv.find((a) => a.startsWith('--dir='))?.split('=')[1] ?? SCORES_DIR);
 const resolver = resolverFor(process.argv.includes('--offline'));
 const key = process.argv.slice(2).find((a) => !a.startsWith('--')) ?? 'SCN';
 
 async function main() {
   const venue = findVenue(key);
   if (!venue) throw new Error(`Unknown venue ${key}`);
-  const original = readScoreVC(venue.slug);
+  const original = readScoreVC(venue.slug, DIR);
+  const formula = FORMULAS[original.manifest.formulaVersion];   // the same function the verifier runs
   const platform = loadPlatform();
   const retr = original.manifest.inputs.find((i) => i.metric === 'rw.retractions');
 
@@ -43,10 +47,11 @@ async function main() {
 
   // 3. Dishonest platform signs an inflated score (valid signature, wrong math)
   {
-    const payload = { ...original.subject, score: 92 };
+    const inflated = original.subject.score === 92 ? 93 : 92;
+    const payload = { ...original.subject, score: inflated };
     const vc = await issueScore(platform, { payload, manifest: original.manifest });
     printReport(await verifyScoreJwt(vc.jwt, { resolver }),
-      '3. The platform itself signs an inflated score of 92');
+      `3. The platform itself signs an inflated score of ${inflated}`);
   }
 
   // A. Dishonest platform removes the warning flags and claims full confidence
@@ -68,8 +73,8 @@ async function main() {
   // 4. Dishonest platform hides retractions in the manifest and recomputes consistently
   if (retr) {
     const inputs = original.manifest.inputs.map((i) => (i.metric === 'rw.retractions' ? { ...i, value: 0 } : i));
-    const re = computeScore(original.manifest.venueType, inputs);
-    const payload = { ...original.subject, score: re.score, breakdown: re.breakdown, confidence: re.confidence, flags: re.flags };
+    const re = formula.compute(original.manifest.venueType, inputs, original.manifest.cohort);
+    const payload = { ...original.subject, score: re.score, class: re.class, breakdown: re.breakdown, confidence: re.confidence, flags: re.flags };
     const vc = await issueScore(platform, { payload, manifest: { ...original.manifest, inputs } });
     console.log(chalk.yellow.bold(`\n4. The platform lies about the input data (not caught yet: needs check against the public source edition)`));
     console.log(chalk.gray(`   claims 0 retractions for ${venue.key}, real value is ${retr.value}`));

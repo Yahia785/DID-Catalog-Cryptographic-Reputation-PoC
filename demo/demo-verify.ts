@@ -1,6 +1,7 @@
 import chalk from 'chalk';
 import fs from 'node:fs';
-import { vcPathFor } from '../src/scoring/read-vc.js';
+import path from 'node:path';
+import { SCORES_DIR, vcPathFor } from '../src/scoring/read-vc.js';
 import { resolverFor, verifyScoreJwt, type Check, type VerifyReport } from '../src/verification/verify-score.js';
 import { VENUES, findVenue } from '../src/venues/registry.js';
 
@@ -8,8 +9,11 @@ import { VENUES, findVenue } from '../src/venues/registry.js';
  * npm run demo:verify -- SCN           verify one venue's signed score, step by step
  * npm run demo:verify -- --all         verify every venue (one line each)
  * npm run demo:verify -- --file=path   verify any score VC file (e.g. one someone sent you)
+ * Add --dir=output/scores/f1 to use the formula 1.0 credentials instead of output/scores/.
  * Add --offline to read the cached audit logs in output/plc-cache/ (see: npm run cache:plc) instead of plc.directory.
  */
+
+const DIR = path.resolve(process.argv.find((a) => a.startsWith('--dir='))?.split('=')[1] ?? SCORES_DIR);
 
 const icon: Record<Check['status'], string> = {
   pass: chalk.green('✓'), fail: chalk.red('✗'), warn: chalk.yellow('⚠'), skip: chalk.gray('–'),
@@ -19,7 +23,7 @@ export function printReport(r: VerifyReport, title?: string) {
   if (title) console.log(chalk.bold(`\n${title}`));
   console.log(chalk.gray(`${r.venueKey}  venue ${r.venueDID}  issuer ${r.issuer}`));
   for (const c of r.checks) console.log(`  ${icon[c.status]} ${c.name.padEnd(22)} ${chalk.gray(c.detail)}`);
-  console.log(r.ok ? chalk.green.bold(`  → VALID: score ${r.score} is authentic and reproducible`) : chalk.red.bold('  → INVALID: do not trust this score'));
+  console.log(r.ok ? chalk.green.bold(`  → VALID: ${r.class ? `class ${r.class}, points ${r.score}` : `score ${r.score}`} is authentic and reproducible`) : chalk.red.bold('  → INVALID: do not trust this score'));
 }
 
 async function main() {
@@ -30,8 +34,8 @@ async function main() {
     console.log(chalk.bold('\nVerifying all signed scores\n'));
     let failed = 0;
     for (const v of VENUES) {
-      if (!fs.existsSync(vcPathFor(v.slug))) continue;
-      const r = await verifyScoreJwt(fs.readFileSync(vcPathFor(v.slug), 'utf8'), { resolver });
+      if (!fs.existsSync(vcPathFor(v.slug, DIR))) continue;
+      const r = await verifyScoreJwt(fs.readFileSync(vcPathFor(v.slug, DIR), 'utf8'), { resolver });
       if (!r.ok) failed++;
       console.log(`  ${r.ok ? chalk.green('✓') : chalk.red('✗')} ${v.key.padEnd(9)} ${r.checks.map((c) => icon[c.status]).join(' ')}  ${chalk.gray(r.checks.filter((c) => c.status !== 'pass').map((c) => c.name).join(', '))}`);
     }
@@ -46,7 +50,7 @@ async function main() {
     const key = process.argv.slice(2).find((a) => !a.startsWith('--'));
     const venue = key ? findVenue(key) : undefined;
     if (!venue) throw new Error(`Give a venue (${VENUES.map((v) => v.key).join(', ')}), --all, or --file=path`);
-    jwt = fs.readFileSync(vcPathFor(venue.slug), 'utf8');
+    jwt = fs.readFileSync(vcPathFor(venue.slug, DIR), 'utf8');
   }
   const r = await verifyScoreJwt(jwt, { resolver });
   printReport(r, 'Verifying score credential');

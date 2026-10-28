@@ -1,4 +1,5 @@
-import type { InputValue, ScoreBreakdown, VenueType } from '../shared/types.js';
+import type { InputValue, ScoreCohort, VenueType } from '../shared/types.js';
+import { computeScore1, FORMULA_1_DESCRIPTION } from './formula-1.js';
 
 /**
  * The scoring formula. A PURE function: the same inputs always give the same
@@ -23,12 +24,14 @@ export const FORMULA_DESCRIPTION = [
 ].join(' ');
 
 export interface ComputedScore {
-  breakdown: ScoreBreakdown;
+  breakdown: Record<string, number | string | null>;
   score: number | null;
+  /** Formula 1.0 and later: the class (0.1-demo has none). */
+  class?: string;
   confidence: { present: number; total: number };
   flags: string[];
   /** Human-readable working for each sub-score and the final score (display only, never signed). */
-  explain: Record<keyof ScoreBreakdown | 'score', string>;
+  explain: Record<string, string>;
 }
 
 const clamp = (x: number) => Math.max(0, Math.min(1, x));
@@ -42,7 +45,7 @@ const logText = (x: number, cap: number) => {
 };
 
 /** Read one input by metric name; null if missing or not a number/string. */
-function reader(inputs: InputValue[]) {
+export function reader(inputs: InputValue[]) {
   const map = new Map(inputs.map((i) => [i.metric, i.value]));
   return {
     num: (m: string): number | null => { const v = map.get(m); return typeof v === 'number' && Number.isFinite(v) ? v : null; },
@@ -77,7 +80,7 @@ function impact(type: VenueType, get: ReturnType<typeof reader>): { value: numbe
   return { value: logScale(perPaper, 40), text: `${cites} / ${papers} = ${f(perPaper)} per paper → ${logText(perPaper, 40)}` };
 }
 
-function stability(series: number[]): { value: number | null; ratio: number | null; text: string } {
+export function stability(series: number[]): { value: number | null; ratio: number | null; text: string } {
   const active = series.filter((n) => n > 0).sort((a, b) => a - b);
   if (active.length < 3) return { value: null, ratio: null, text: `only ${active.length} year(s) with papers (needs 3) → no data` };
   const median = active[Math.floor(active.length / 2)];
@@ -87,7 +90,7 @@ function stability(series: number[]): { value: number | null; ratio: number | nu
   return { value: clamp(raw), ratio, text: `peak ${peak} / median ${median} = ${f(ratio)} → 1 - (${f(ratio)} - 2) / 8 = ${f(raw, 3)}${clampNote(raw)}` };
 }
 
-function integrity(type: VenueType, get: ReturnType<typeof reader>): { value: number | null; wave: boolean; text: string } {
+export function integrity(type: VenueType, get: ReturnType<typeof reader>): { value: number | null; wave: boolean; text: string } {
   const ret = get.num('rw.retractions');
   if (ret === null) return { value: null, wave: false, text: 'no retraction data → no data' };
   if (type === 'journal') {
@@ -119,7 +122,7 @@ export function computeScore(type: VenueType, inputs: InputValue[]): ComputedSco
   const integ = integrity(type, get);
   if (integ.wave) flags.push('retraction wave');
 
-  const breakdown: ScoreBreakdown = {
+  const breakdown = {
     standing: st.value === null ? null : r3(st.value),
     impact: im.value === null ? null : r3(im.value),
     stability: stab.value === null ? null : r3(stab.value),
@@ -145,6 +148,11 @@ export function computeScore(type: VenueType, inputs: InputValue[]): ComputedSco
  * credential's formulaVersion up here; an unknown version cannot be checked.
  * Old versions stay in the registry so old credentials remain verifiable.
  */
-export const FORMULAS: Record<string, { description: string; compute: (type: VenueType, inputs: InputValue[]) => ComputedScore }> = {
+export const FORMULAS: Record<string, { description: string; compute: (type: VenueType, inputs: InputValue[], cohort?: ScoreCohort) => ComputedScore }> = {
   [FORMULA_VERSION]: { description: FORMULA_DESCRIPTION, compute: computeScore },
+  // formula-1.ts imports helpers from this file, so its exports are read lazily (the two modules import each other)
+  '1.0': {
+    get description() { return FORMULA_1_DESCRIPTION; },
+    compute: (type, inputs, cohort) => computeScore1(type, inputs, cohort),
+  },
 };

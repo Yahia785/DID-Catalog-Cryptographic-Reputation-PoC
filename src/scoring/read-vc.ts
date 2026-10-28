@@ -22,10 +22,10 @@ export function decodeScoreVC(jwt: string): DecodedScoreVC {
   return { jwt: jwt.trim(), header, claims, subject: subject as ScorePayload, manifest: provenanceManifest as ProvenanceManifest };
 }
 
-export const vcPathFor = (slug: string) => path.join(SCORES_DIR, `${slug}.vc.jwt`);
+export const vcPathFor = (slug: string, dir = SCORES_DIR) => path.join(dir, `${slug}.vc.jwt`);
 
-export function readScoreVC(slug: string): DecodedScoreVC {
-  const file = vcPathFor(slug);
+export function readScoreVC(slug: string, dir = SCORES_DIR): DecodedScoreVC {
+  const file = vcPathFor(slug, dir);
   if (!fs.existsSync(file)) throw new Error(`${path.relative('.', file)} not found. Run: npm run score`);
   return decodeScoreVC(fs.readFileSync(file, 'utf8'));
 }

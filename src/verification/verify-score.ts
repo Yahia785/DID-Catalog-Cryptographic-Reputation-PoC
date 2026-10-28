@@ -19,7 +19,7 @@ import { loadVenueRecords } from '../venues/venue-records.js';
 
 export type Status = 'pass' | 'fail' | 'warn' | 'skip';
 export interface Check { name: string; status: Status; detail: string }
-export interface VerifyReport { venueKey: string; venueDID: string; issuer: string; score: number | null; checks: Check[]; ok: boolean }
+export interface VerifyReport { venueKey: string; venueDID: string; issuer: string; score: number | null; class?: string; checks: Check[]; ok: boolean }
 
 export interface VerifyOptions {
   resolver?: DidResolver; // where DID audit logs come from; default: plc.directory
@@ -134,8 +134,9 @@ export async function verifyScoreJwt(jwt: string, opts: VerifyOptions = {}): Pro
     if (!formula) problems.push(`unknown formula version ${manifest.formulaVersion}`);
     else {
       mismatch('formula description', formula.description, manifest.formula);
-      const re = formula.compute(manifest.venueType, manifest.inputs);
+      const re = formula.compute(manifest.venueType, manifest.inputs, manifest.cohort);
       mismatch('score', re.score, subject.score);
+      mismatch('class', re.class, subject.class);
       mismatch('breakdown', re.breakdown, subject.breakdown);
       mismatch('confidence', re.confidence, subject.confidence);
       mismatch('flags', re.flags, subject.flags);
@@ -149,5 +150,5 @@ export async function verifyScoreJwt(jwt: string, opts: VerifyOptions = {}): Pro
 
   if (opts.timings) opts.timings.recomputeMs = performance.now() - tRec;
 
-  return { venueKey: manifest.venueKey, venueDID: subject.venue, issuer: claims.iss, score: subject.score, checks, ok: !checks.some((c) => c.status === 'fail') };
+  return { venueKey: manifest.venueKey, venueDID: subject.venue, issuer: claims.iss, score: subject.score, class: subject.class, checks, ok: !checks.some((c) => c.status === 'fail') };
 }

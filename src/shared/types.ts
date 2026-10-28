@@ -15,6 +15,8 @@ export interface SourceSnapshot {
   url: string;              // where the data came from
   retrievedAt: string;      // ISO timestamp
   file: string;             // snapshot file path, relative to the project
+  sha256?: string;          // for exported files (formula 1.0 snapshots): hash of the file that was read
+  bytes?: number;           // for exported files: its size
 }
 
 /** One raw value fed into the formula, with the source it came from. */
@@ -37,18 +39,30 @@ export interface ProvenanceManifest {
   formulaVersion: string;   // e.g. '0.1-demo'
   sources: SourceSnapshot[];
   inputs: InputValue[];
+  /** Formula 1.0 and later: the sample the venue is ranked within (see ScoreCohort). */
+  cohort?: ScoreCohort;
   computedAt: string;
+}
+
+/**
+ * The venues a score is ranked against: for each ranked indicator, the sorted values of all
+ * sample venues that have it, e.g. "conf.openalex.hIndex". Signed inside the manifest, so a
+ * verifier recomputes the rank from the credential alone.
+ */
+export interface ScoreCohort {
+  id: string;                         // e.g. 'sample-2026-10'
+  populationSize?: number;            // conferences: the size of the whole ICORE population (800)
+  values: Record<string, number[]>;   // indicator → sorted values of the sample venues that have it
 }
 
 // ─── Score ───────────────────────────────────────────────────
 
-/** Sub-scores on a 0–1 scale. null = input missing, left out of the average. */
-export interface ScoreBreakdown {
-  standing: number | null;
-  impact: number | null;
-  stability: number | null;
-  integrity: number | null;
-}
+/**
+ * Named values behind a score; each formula version defines its own fields.
+ * 0.1-demo: sub-scores on a 0–1 scale (null = input missing, left out of the average).
+ * 1.0: per-source classes or percentiles, bands, corrections.
+ */
+export type ScoreBreakdown = Record<string, number | string | null>;
 
 /** The claim the platform signs about a venue. */
 export interface ScorePayload {
@@ -57,8 +71,9 @@ export interface ScorePayload {
   venue: string;             // venue DID (subject)
   venueType: VenueType;
   verificationMethod: string; // platform signing key reference, e.g. did:plc:...#signing-1
-  score: number | null;      // 0–100; null if no sub-score could be computed
-  confidence: { present: number; total: number }; // how many sub-scores had data
+  score: number | null;      // 0.1-demo: 0–100. 1.0: points (conference class points, or journal percentile); null if not rated
+  class?: string;            // 1.0: the class ('A++' … 'Work in progress'; journals '200' … '20', 'Not rated')
+  confidence: { present: number; total: number }; // how many sub-scores (0.1-demo) or sources (1.0) had data
   breakdown: ScoreBreakdown;
   flags: string[];           // e.g. 'retraction wave', 'not indexed'
   formulaVersion: string;

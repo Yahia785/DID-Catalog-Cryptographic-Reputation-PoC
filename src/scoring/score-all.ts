@@ -8,6 +8,7 @@ import { FORMULA_VERSION } from './compute-score.js';
 import { issueScore } from './issue-score.js';
 import { SNAPSHOTS_ROOT, latestSnapshotDir, loadSnapshot } from './snapshot-store.js';
 import fs from 'node:fs';
+import { scoreFormula1 } from './score-1.js';
 
 /**
  * npm run score
@@ -18,6 +19,9 @@ import fs from 'node:fs';
  * Options:
  *   --snapshot=YYYY-MM-DD   use a specific snapshot (default: latest)
  *   --venue=SCN             score one venue only
+ *   --formula=1.0 --snapshot=f1-2026-10-28 [--bench]
+ *                           formula 1.0 for all venues from a formula-1.0 snapshot, into output/scores/f1/
+ *                           (see score-1.ts; --bench also measures issuing, checking and sizes)
  *
  * Output per venue (slug = file-safe name, e.g. 'scn'):
  *   output/scores/<slug>.vc.jwt           the signed credential (this is what gets shared)
@@ -30,6 +34,11 @@ export const SCORES_DIR = path.resolve('output/scores');
 const arg = (name: string) => process.argv.find((a) => a.startsWith(`--${name}=`))?.split('=')[1];
 
 async function main() {
+  if (arg('formula') === '1.0') {
+    if (!arg('snapshot')) throw new Error('--formula=1.0 needs --snapshot=<formula 1.0 snapshot folder>, e.g. --snapshot=f1-2026-10-28');
+    return scoreFormula1(arg('snapshot')!, process.argv.includes('--bench'));
+  }
+  if (arg('formula')) throw new Error(`unknown --formula=${arg('formula')} (0.1-demo is the default; 1.0 needs --snapshot)`);
   const snapshotDir = arg('snapshot') ? path.join(SNAPSHOTS_ROOT, arg('snapshot')!) : latestSnapshotDir();
   const snapshot = loadSnapshot(snapshotDir);
   const platform = loadPlatform();

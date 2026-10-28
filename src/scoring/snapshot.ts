@@ -4,6 +4,7 @@ import path from 'node:path';
 import { readCsv } from '../shared/csv.js';
 import { buildUrl, getJson, mailto } from '../shared/http.js';
 import { VENUES, type VenueEntry } from '../venues/registry.js';
+import { collectFormula1 } from './snapshot-1.js';
 import {
   ALL_SOURCES, SNAPSHOTS_ROOT, fileFor, rel, writeIndex,
   type SnapshotFile, type SourceDataMap, type SourceId, type SourceInfo,
@@ -19,6 +20,9 @@ import {
  *   --sources=icore,scimago,retraction-watch,openalex,crossref,s2   (default: all)
  *   --reuse       keep source files that already exist in today's folder (resume after a failure)
  *   --dir=NAME    folder name instead of today's date
+ *   --formula=1.0 collect only the inputs formula 1.0 needs (icore, scimago, openalex by id, retraction-watch)
+ *                 into data/snapshots/f1-<date>/ and benchmark the collection; see snapshot-1.ts.
+ *                 With --allow-failures, values whose requests failed are saved as "failed".
  *
  * Needs the three downloaded CSVs in data/: core.csv, scimago.csv, retraction_watch.csv
  */
@@ -176,6 +180,8 @@ const RUNNERS: Record<SourceId, () => void | Promise<void>> = {
 };
 
 async function main() {
+  if (arg('formula') === '1.0') return collectFormula1();
+  if (arg('formula')) throw new Error(`unknown --formula=${arg('formula')} (only 1.0)`);
   console.log(chalk.bold(`\n=== DIDcal: data snapshot → ${rel(DIR)} ===\n`));
   fs.mkdirSync(DIR, { recursive: true });
   for (const id of SELECTED) {

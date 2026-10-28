@@ -22,13 +22,15 @@ export interface SourceInfo {
   edition?: string;
   retrievedAt: string;
   inputFile?: string;     // for CSV sources: the downloaded file that was read
+  sha256?: string;        // for CSV sources: hash of that file (formula 1.0 snapshots)
+  bytes?: number;         // for CSV sources: size of that file
 }
 
 // Per-venue data from each source. null = the venue is not in that source.
 export interface IcoreData { coreId: string; title: string; acronym: string; edition: string; rank: string }
-export interface ScimagoData { title: string; sjr: number | null; quartile: string; hIndex: number | null; totalDocs3y: number | null; citesPerDoc2y: number | null }
+export interface ScimagoData { title: string; sjr: number | null; quartile: string; hIndex: number | null; totalDocs3y: number | null; citesPerDoc2y: number | null; categories?: string; sourceid?: string }
 export interface RetractionData { records: number; retractions: number; byYear: Record<string, number>; topReasons: Record<string, number> }
-export interface OpenAlexData { worksCount: number; citedByCount: number; twoYrMeanCitedness: number | null; hIndex: number | null; worksByYear: Record<string, number> }
+export interface OpenAlexData { worksCount: number; citedByCount: number; twoYrMeanCitedness: number | null; hIndex: number | null; worksByYear: Record<string, number>; openalexId?: string; displayName?: string }
 export interface CrossrefData { totalDois: number | null; doisByYear: Record<string, number>; retractionNotices: number | null }
 export interface S2Data { venueName: string; papersByYear: Record<string, number>; cohortYear: number; cohortPapers: number; cohortCitations: number }
 
@@ -37,14 +39,33 @@ export interface SourceDataMap {
   openalex: OpenAlexData; crossref: CrossrefData; s2: S2Data;
 }
 
+/**
+ * What a source file holds for one venue: the data, null (the source was asked and does not have the
+ * venue), or 'failed' (the request kept failing, so we do not know). 'failed' is never the same as null.
+ */
+export const FAILED = 'failed' as const;
+export type VenueSlot<T> = T | null | typeof FAILED;
+
 export interface SnapshotFile<T> {
   source: SourceInfo;
   years: number[];                         // the full years covered, e.g. 2016–2025
-  venues: Record<string, T | null>;        // keyed by registry key, e.g. 'SCN'
+  venues: Record<string, VenueSlot<T>>;    // keyed by registry key, e.g. 'SCN'
+}
+
+/** A venue's data from a source file; throws on a failed collection rather than treating it as missing. */
+export function slot<T>(file: SnapshotFile<T> | undefined, key: string): T | null {
+  const v = file?.venues[key];
+  if (v === FAILED) throw new Error(`${file!.source.id} data for ${key} failed to collect: this snapshot cannot be used to score it`);
+  return v ?? null;
 }
 
 export interface SnapshotIndexEntry { id: SourceId; file: string }
-export interface SnapshotIndex { createdAt: string; dir: string; files: SnapshotIndexEntry[] }
+export interface SnapshotFailure { source: SourceId; venue: string; reason: string }
+export interface SnapshotIndex {
+  createdAt: string; dir: string; files: SnapshotIndexEntry[];
+  formula?: string;                        // '1.0' for snapshots made with --formula=1.0
+  failures?: SnapshotFailure[];            // values marked 'failed' (only with --allow-failures)
+}
 
 export interface Snapshot {
   dir: string;                              // relative path, e.g. data/snapshots/2026-09-25
@@ -76,13 +97,13 @@ export function loadSnapshot(dir = latestSnapshotDir()): Snapshot {
 }
 
 /** Rebuild index.json from the source files present in a snapshot folder. */
-export function writeIndex(dir: string): SnapshotIndex {
+export function writeIndex(dir: string, extra: { formula?: string; failures?: SnapshotFailure[] } = {}): SnapshotIndex {
   const files: SnapshotIndexEntry[] = [];
   for (const id of ALL_SOURCES) {
     const f = fileFor(dir, id);
     if (fs.existsSync(f)) files.push({ id, file: rel(f) });
   }
-  const index: SnapshotIndex = { createdAt: new Date().toISOString(), dir: rel(dir), files };
+  const index: SnapshotIndex = { createdAt: new Date().toISOString(), dir: rel(dir), files, ...extra };
   fs.writeFileSync(path.join(dir, 'index.json'), JSON.stringify(index, null, 2));
   return index;
 }

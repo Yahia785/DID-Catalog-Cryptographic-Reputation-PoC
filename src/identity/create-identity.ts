@@ -156,18 +156,38 @@ async function signGenesisOperation(
 async function publishToDirectory(
   did: string,
   signedOperation: Record<string, unknown>
-): Promise<void> {
+): Promise<PublishResult> {
   const url = `https://plc.directory/${did}`;
+  const body = JSON.stringify(signedOperation);
   const response = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(signedOperation),
+    body,
   });
 
+  const text = await response.text();
+  const result = { status: response.status, requestBytes: Buffer.byteLength(body), responseBytes: Buffer.byteLength(text) };
   if (!response.ok) {
-    const body = await response.text();
-    throw new Error(`plc.directory publish failed (${response.status}): ${body}`);
+    throw Object.assign(new Error(`plc.directory publish failed (${response.status}): ${text}`), { publish: result });
   }
+  return result;
+}
+
+interface PublishResult { status: number; requestBytes: number; responseBytes: number }
+
+/**
+ * What creating one identity cost, in milliseconds and bytes (for benchmarks; see CreateOptions.timings).
+ * The publish fields are null when nothing was published (dry run).
+ */
+export interface CreateTimings {
+  keyGenMs: number;              // both key pairs (the rotation key is imported when a group key is given)
+  buildMs: number;               // building the unsigned genesis operation
+  signMs: number;                // DAG-CBOR encoding, signing, hashing, deriving the DID
+  publishMs: number | null;      // the POST to plc.directory, until the response body is read
+  httpStatus: number | null;
+  requestBytes: number | null;   // size of the POST body
+  responseBytes: number | null;  // size of the POST response body
+  error?: string;                // set when publishing failed (the error is also thrown)
 }
 
 /**
@@ -188,8 +208,13 @@ export async function createIdentity(
     handle?: string;
     /** Custom DIDcal service entry, e.g. { type: 'DIDcalVenue', endpoint: 'https://didcal.io/journals' }. */
     service?: { type: string; endpoint: string };
+    /** Called once with the timings of this creation, also when publishing fails (then with `error`). */
+    timings?: (t: CreateTimings) => void;
   } = {}
 ): Promise<Identity> {
+  const t: CreateTimings = { keyGenMs: 0, buildMs: 0, signMs: 0, publishMs: null, httpStatus: null, requestBytes: null, responseBytes: null };
+  let mark = performance.now();
+  const lap = () => { const now = performance.now(); const d = now - mark; mark = now; return d; };
   // 1. Rotation keypair: reuse the given one, or generate a new one
   const rotationKeyPair = options.rotationPrivateKey
     ? await atprotoCrypto.Secp256k1Keypair.import(options.rotationPrivateKey, { exportable: true })
@@ -198,6 +223,7 @@ export async function createIdentity(
 
   // 2. Generate P-256 signing keypair (always unique per identity)
   const signingKey = generateP256KeyPair();
+  t.keyGenMs = lap();
 
   // 3. Build unsigned genesis operation
   const unsignedOp = buildGenesisOperation(
@@ -207,14 +233,28 @@ export async function createIdentity(
     label,
     { handle: options.handle, service: options.service }
   );
+  t.buildMs = lap();
 
   // 4. Sign and derive DID
   const { signedOperation, did } = await signGenesisOperation(unsignedOp, rotationKeyPair);
+  t.signMs = lap();
 
   // 5. Publish (unless dry run)
   if (!options.dryRun) {
-    await publishToDirectory(did, signedOperation);
+    try {
+      const p = await publishToDirectory(did, signedOperation);
+      t.publishMs = lap();
+      Object.assign(t, { httpStatus: p.status, requestBytes: p.requestBytes, responseBytes: p.responseBytes });
+    } catch (e) {
+      t.publishMs = lap();
+      const p = (e as { publish?: PublishResult }).publish;
+      if (p) Object.assign(t, { httpStatus: p.status, requestBytes: p.requestBytes, responseBytes: p.responseBytes });
+      t.error = e instanceof Error ? e.message : String(e);
+      options.timings?.(t);
+      throw e;
+    }
   }
+  options.timings?.(t);
 
   return {
     did,

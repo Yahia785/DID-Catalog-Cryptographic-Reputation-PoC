@@ -1,7 +1,7 @@
 import type { InputValue, ReputationScore, SourceSnapshot } from '../shared/types.js';
 import type { VenueEntry } from '../venues/registry.js';
 import { computeScore, FORMULA_DESCRIPTION, FORMULA_VERSION } from './compute-score.js';
-import type { Snapshot, SourceId } from './snapshot-store.js';
+import { slot, type Snapshot, type SourceId } from './snapshot-store.js';
 
 /**
  * Turn a snapshot into the formula's inputs for one venue, run the formula,
@@ -15,17 +15,17 @@ export function buildInputs(venue: VenueEntry, snap: Snapshot): InputValue[] {
   const add = (metric: string, value: number | string | null | undefined, sourceId: SourceId) =>
     inputs.push({ metric, value: value ?? null, sourceId });
 
-  const rw = s['retraction-watch']?.venues[venue.key];
+  const rw = slot(s['retraction-watch'], venue.key);
   if (venue.type === 'conference') {
-    add('icore.rank', s.icore?.venues[venue.key]?.rank, 'icore');
-    const s2 = s.s2?.venues[venue.key];
+    add('icore.rank', slot(s.icore, venue.key)?.rank, 'icore');
+    const s2 = slot(s.s2, venue.key);
     for (const y of s.s2?.years ?? []) add(`s2.papers.${y}`, s2?.papersByYear[y], 's2');
     add('s2.cohortYear', s2?.cohortYear, 's2');
     add('s2.cohortPapers', s2?.cohortPapers, 's2');
     add('s2.cohortCitations', s2?.cohortCitations, 's2');
   } else {
-    add('scimago.quartile', s.scimago?.venues[venue.key]?.quartile, 'scimago');
-    const oa = s.openalex?.venues[venue.key];
+    add('scimago.quartile', slot(s.scimago, venue.key)?.quartile, 'scimago');
+    const oa = slot(s.openalex, venue.key);
     add('openalex.twoYrMeanCitedness', oa?.twoYrMeanCitedness, 'openalex');
     add('openalex.worksCount', oa?.worksCount, 'openalex');
     for (const y of s.openalex?.years ?? []) add(`openalex.works.${y}`, oa?.worksByYear[y], 'openalex');
@@ -44,6 +44,7 @@ export function sourcesFor(inputs: InputValue[], snap: Snapshot): SourceSnapshot
       return {
         id: f.id, name: info.name, access: info.access, edition: info.edition,
         url: info.url, retrievedAt: info.retrievedAt, file: f.file,
+        ...(info.sha256 ? { sha256: info.sha256, bytes: info.bytes } : {}),
       };
     });
 }
