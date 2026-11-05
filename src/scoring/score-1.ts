@@ -40,7 +40,7 @@ const BAND_ORDER = ['200', '140', '100', '70', '40', '20', 'Not rated'];
 const ms = (x: number) => Math.round(x * 1000) / 1000;
 
 /** Bytes of the cohort inside the signed JWT: the base64url growth it causes in the credential payload. */
-function cohortBytesIn(jwt: string): number {
+export function cohortBytesIn(jwt: string): number {
   const [h, p] = jwt.split('.');
   const claims = JSON.parse(Buffer.from(p, 'base64url').toString());
   const withIt = Buffer.from(JSON.stringify(claims)).toString('base64url').length;

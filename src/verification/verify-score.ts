@@ -31,7 +31,7 @@ export interface VerifyReport { venueKey: string; venueDID: string; issuer: stri
 
 export interface VerifyOptions {
   resolver?: DidResolver; // where DID audit logs come from; default: plc.directory
-  timings?: { signatureMs?: number; recomputeMs?: number; formulaMs?: number; inputsMs?: number }; // filled in with how long those checks took (for benchmarks)
+  timings?: { signatureMs?: number; identitiesMs?: number; venueMs?: number; recomputeMs?: number; formulaMs?: number; inputsMs?: number }; // filled in with how long each check took (for benchmarks)
   sourcesDir?: string | ProviderFiles; // folder with the provider's own icore.csv / scimago.csv / retraction_watch.csv; adds the sixth check, Inputs
   releases?: ReleaseList | null; // the formula release list; default: releases/formula-releases.json
   codeHashOf?: (formulaVersion: string) => string; // hash of this checker's own copy of a formula's code; default: hash the source file
@@ -147,15 +147,18 @@ export async function verifyScoreJwt(jwt: string, opts: VerifyOptions = {}): Pro
   if (opts.timings) opts.timings.signatureMs = performance.now() - tSig;
 
   // 2. Identities
+  const tIds = performance.now();
   const idsOk = claims.iss === subject.platform && subject.platform === manifest.platformDID
     && claims.sub === subject.venue && subject.venue === manifest.venueDID;
   add('Identities', idsOk ? 'pass' : 'fail', idsOk ? `issuer ${claims.iss}, venue ${claims.sub}` : 'issuer/venue DIDs disagree between the JWT, the score and the manifest');
+  if (opts.timings) opts.timings.identitiesMs = performance.now() - tIds;
 
   // 3. Venue
   // One-direction check only: does the venue DID claim this handle (alsoKnownAs)?
   // The reverse direction — proving the handle's domain actually points back to this
   // DID, via a DNS TXT record at _atproto.<handle> or https://<handle>/.well-known/atproto-did —
   // needs didcal.io to serve those records, so it is left as future work.
+  const tVenue = performance.now();
   const venue = findVenue(manifest.venueKey);
   if (!venue) {
     add('Venue', 'fail', `unknown venue key ${manifest.venueKey}`);
@@ -178,6 +181,8 @@ export async function verifyScoreJwt(jwt: string, opts: VerifyOptions = {}): Pro
       }
     }
   }
+
+  if (opts.timings) opts.timings.venueMs = performance.now() - tVenue;
 
   // 4. Recompute
   const tRec = performance.now();

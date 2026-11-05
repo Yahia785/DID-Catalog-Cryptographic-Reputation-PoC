@@ -28,6 +28,9 @@ const realFetch = globalThis.fetch;
 const net = { requests: 0, bytes: 0, fetchMs: 0, waitMs: 0 };
 let lastRequestAt = 0;
 
+/** The counters of countFetch right now (requests, body bytes, time inside fetch, politeness wait), as a copy. */
+export const netSnapshot = () => ({ ...net });
+
 /** Count every fetch (requests, body bytes, time inside fetch) and space requests at least minGapMs apart. Returns restore(). */
 export function countFetch(minGapMs: number): () => void {
   globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
