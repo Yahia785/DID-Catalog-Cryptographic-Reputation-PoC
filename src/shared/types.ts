@@ -17,6 +17,20 @@ export interface SourceSnapshot {
   file: string;             // snapshot file path, relative to the project
   sha256?: string;          // for exported files (formula 1.0 snapshots): hash of the file that was read
   bytes?: number;           // for exported files: its size
+  /**
+   * L3 ("Inputs" check). 'file': the provider publishes this as a fixed, dated file, so a checker can
+   * rerun the extraction on the provider's own copy. 'live': a live API with no fixed edition
+   * (OpenAlex), covered by the signature and the recompute only.
+   */
+  verifiable?: 'file' | 'live';
+  verifiableReason?: string;       // for 'live': why it cannot be checked against a file
+  /**
+   * The rule that picks this venue's values out of the provider's file, so the checker finds the same row.
+   * icore { coreId } · scimago { sourceid, issn? } · openalex { openalexId } ·
+   * retraction-watch { rwMatch, rwExclude?, cutoff }: cutoff is the latest RetractionDate in the file that
+   * was read, its "as of" date (YYYY-MM-DD).
+   */
+  match?: Record<string, string>;
 }
 
 /** One raw value fed into the formula, with the source it came from. */

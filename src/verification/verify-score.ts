@@ -7,6 +7,7 @@ import { ANCHOR_SERVICE_KEY, anchorHeadOf, chainProblems, hashFormulaCode, loadR
 import { decodeScoreVC } from '../scoring/read-vc.js';
 import type { ProvenanceManifest } from '../shared/types.js';
 import { findVenue, handleOf } from '../venues/registry.js';
+import { checkInputs, providerFilesFor, ProviderFiles, type InputsResult } from './check-inputs.js';
 import { loadVenueRecords } from '../venues/venue-records.js';
 
 /**
@@ -20,15 +21,18 @@ import { loadVenueRecords } from '../venues/venue-records.js';
  *   5. Formula     the formula's code is the one that was released: its code hash is in a signed,
  *                  unbroken release chain whose head is anchored in the platform DID, and the anchor
  *                  is older than the credential
+ *   6. Inputs      (only with the sourcesDir option) the inputs match the provider's own published files
+ *                  that the checker downloaded: see check-inputs.ts
  */
 
 export type Status = 'pass' | 'fail' | 'warn' | 'skip';
 export interface Check { name: string; status: Status; detail: string }
-export interface VerifyReport { venueKey: string; venueDID: string; issuer: string; score: number | null; class?: string; checks: Check[]; ok: boolean }
+export interface VerifyReport { venueKey: string; venueDID: string; issuer: string; score: number | null; class?: string; checks: Check[]; ok: boolean; inputs?: InputsResult }
 
 export interface VerifyOptions {
   resolver?: DidResolver; // where DID audit logs come from; default: plc.directory
-  timings?: { signatureMs?: number; recomputeMs?: number; formulaMs?: number }; // filled in with how long those checks took (for benchmarks)
+  timings?: { signatureMs?: number; recomputeMs?: number; formulaMs?: number; inputsMs?: number }; // filled in with how long those checks took (for benchmarks)
+  sourcesDir?: string | ProviderFiles; // folder with the provider's own icore.csv / scimago.csv / retraction_watch.csv; adds the sixth check, Inputs
   releases?: ReleaseList | null; // the formula release list; default: releases/formula-releases.json
   codeHashOf?: (formulaVersion: string) => string; // hash of this checker's own copy of a formula's code; default: hash the source file
 }
@@ -211,5 +215,14 @@ export async function verifyScoreJwt(jwt: string, opts: VerifyOptions = {}): Pro
   add('Formula', formulaCheck.status, formulaCheck.detail);
   if (opts.timings) opts.timings.formulaMs = performance.now() - tFormula;
 
-  return { venueKey: manifest.venueKey, venueDID: subject.venue, issuer: claims.iss, score: subject.score, class: subject.class, checks, ok: !checks.some((c) => c.status === 'fail') };
+  // 6. Inputs (L3), only when the checker has provider files
+  let inputs: InputsResult | undefined;
+  if (opts.sourcesDir) {
+    const tInputs = performance.now();
+    inputs = checkInputs(manifest, typeof opts.sourcesDir === 'string' ? providerFilesFor(opts.sourcesDir) : opts.sourcesDir);
+    add('Inputs', inputs.status === 'skip' ? 'skip' : inputs.status, inputs.detail);
+    if (opts.timings) opts.timings.inputsMs = performance.now() - tInputs;
+  }
+
+  return { venueKey: manifest.venueKey, venueDID: subject.venue, issuer: claims.iss, score: subject.score, class: subject.class, checks, ok: !checks.some((c) => c.status === 'fail'), ...(inputs ? { inputs } : {}) };
 }

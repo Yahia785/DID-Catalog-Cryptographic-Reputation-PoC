@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import path from 'node:path';
-import type { InputValue, ReputationScore, ScoreCohort, VenueType } from '../shared/types.js';
+import type { InputValue, ReputationScore, ScoreCohort, SourceSnapshot, VenueType } from '../shared/types.js';
 import { VENUES, type VenueEntry } from '../venues/registry.js';
 import { sourcesFor } from './build-score.js';
 import { FORMULAS } from './compute-score.js';
@@ -60,6 +60,30 @@ export function buildCohort(snap: Snapshot, type: VenueType, venues: VenueEntry[
   return { id: `${path.basename(snap.dir)}/${type}/${hash}`, ...body };
 }
 
+/**
+ * Add what the L3 "Inputs" check needs to each source entry: whether the provider publishes a fixed file
+ * (verifiable) and the rule that finds this venue's row in it (match). Nothing the formula reads changes.
+ */
+export function withVerifiability(sources: SourceSnapshot[], venue: VenueEntry, snap: Snapshot): SourceSnapshot[] {
+  return sources.map((s): SourceSnapshot => {
+    if (s.id === 'openalex') {
+      return { ...s, verifiable: 'live', verifiableReason: 'live API, no fixed edition', ...(venue.openalexId ? { match: { openalexId: venue.openalexId } } : {}) };
+    }
+    const file: SourceSnapshot = { ...s, verifiable: 'file' };
+    if (s.id === 'icore' && venue.coreId) file.match = { coreId: venue.coreId };
+    if (s.id === 'scimago' && venue.scimagoId) {
+      const issn = slot(snap.sources.scimago, venue.key)?.issn;
+      file.match = { sourceid: venue.scimagoId, ...(issn ? { issn } : {}) };
+    }
+    if (s.id === 'retraction-watch' && venue.rwMatch) {
+      const cutoff = snap.sources['retraction-watch']?.source.cutoff;
+      if (!cutoff) throw new Error(`${snap.dir} has no Retraction Watch cutoff (the latest RetractionDate in the file): run  npx tsx src/scoring/snapshot.ts --formula=1.0 --upgrade-l3=${snap.dir.split('/').pop()}`);
+      file.match = { rwMatch: venue.rwMatch, ...(venue.rwExclude ? { rwExclude: venue.rwExclude } : {}), cutoff };
+    }
+    return file;
+  });
+}
+
 /** Run formula 1.0 on prepared inputs and assemble the (unsigned) payload and manifest. */
 export function scoreFromInputs1(args: {
   venue: VenueEntry; venueDID: string; platformDID: string; snapshot: Snapshot; inputs: InputValue[]; cohort: ScoreCohort; computedAt: string;
@@ -78,7 +102,7 @@ export function scoreFromInputs1(args: {
     manifest: {
       venueDID, venueKey: venue.key, venueType: venue.type, platformDID,
       formula: f.description, formulaVersion: '1.0',
-      sources: sourcesFor(inputs, snapshot), inputs, cohort, ...(fingerprint ?? {}), computedAt,
+      sources: withVerifiability(sourcesFor(inputs, snapshot), venue, snapshot), inputs, cohort, ...(fingerprint ?? {}), computedAt,
     },
   };
 }

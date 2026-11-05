@@ -24,11 +24,12 @@ export interface SourceInfo {
   inputFile?: string;     // for CSV sources: the downloaded file that was read
   sha256?: string;        // for CSV sources: hash of that file (formula 1.0 snapshots)
   bytes?: number;         // for CSV sources: size of that file
+  cutoff?: string;        // Retraction Watch: the latest RetractionDate in the file read (YYYY-MM-DD), its "as of" date
 }
 
 // Per-venue data from each source. null = the venue is not in that source.
 export interface IcoreData { coreId: string; title: string; acronym: string; edition: string; rank: string }
-export interface ScimagoData { title: string; sjr: number | null; quartile: string; hIndex: number | null; totalDocs3y: number | null; citesPerDoc2y: number | null; categories?: string; sourceid?: string }
+export interface ScimagoData { title: string; sjr: number | null; quartile: string; hIndex: number | null; totalDocs3y: number | null; citesPerDoc2y: number | null; categories?: string; sourceid?: string; issn?: string }
 export interface RetractionData { records: number; retractions: number; byYear: Record<string, number>; topReasons: Record<string, number> }
 export interface OpenAlexData { worksCount: number; citedByCount: number; twoYrMeanCitedness: number | null; hIndex: number | null; worksByYear: Record<string, number>; openalexId?: string; displayName?: string }
 export interface CrossrefData { totalDois: number | null; doisByYear: Record<string, number>; retractionNotices: number | null }

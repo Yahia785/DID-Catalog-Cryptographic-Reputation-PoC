@@ -153,10 +153,14 @@ describe('tamper scenarios', () => {
     assert.deepEqual(failed(r), ['Signature']);
   });
 
-  it('KNOWN OPEN: platform lies about inputs (needs check against public source edition)', async () => {
+  it('false inputs pass L1 and L2 by design (caught by Inputs, see inputs-check.test.ts)', async () => {
+    // L1 (signature) and L2 (recompute) only show that the score follows from the inputs the platform signed;
+    // whether those inputs are the provider's is the job of the sixth check, Inputs, which needs the provider's files.
     const lied = journalInputs.map((i) => (i.metric === 'rw.retractions' ? { ...i, value: 0 } : i));
     const r = await verify(await sign(makeScore(JOURNAL, journalVenue.did, platform.did, lied)));
-    assert.equal(r.ok, true, 'if this starts failing, the gap has been closed: turn this into a normal test');
+    assert.equal(check(r, 'Signature').status, 'pass');
+    assert.equal(check(r, 'Recompute').status, 'pass');
+    assert.equal(r.ok, true);
     assert.notEqual(r.score, journalScore.payload.score);
   });
 });

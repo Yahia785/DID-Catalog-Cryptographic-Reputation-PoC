@@ -3,9 +3,9 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { parseCsv } from '../shared/csv.js';
 import { buildUrl, fetchJson, mailto, setRequestObserver, type RequestRecord } from '../shared/http.js';
 import { VENUES } from '../venues/registry.js';
+import { extractIcore, extractRetractionWatch, extractScimago, parseIcore, parseRetractionWatch, parseScimago } from './extract-1.js';
 import {
   FAILED, SNAPSHOTS_ROOT, fileFor, rel, writeIndex,
   type SnapshotFailure, type SnapshotFile, type SourceDataMap, type SourceId, type SourceInfo, type VenueSlot,
@@ -24,6 +24,9 @@ import {
  *                     50 ids per request
  *   retraction-watch  retractions by rwMatch / rwExclude (data/retraction_watch.csv)
  *
+ * The three file sources are read with the functions of extract-1.ts, the same ones the L3 "Inputs"
+ * check (verification/check-inputs.ts) runs on the provider's own files.
+ *
  * A request that fails (after its retries) is never written as "venue not in source". Without
  * --allow-failures the run ends with exit code 1 and the list of failures, and no snapshot is
  * written; with it, those values are marked "failed" and listed in index.json under failures.
@@ -40,16 +43,39 @@ const BATCH = 50;
 const OPENALEX_KEY = () => process.env.OPENALEX_API_KEY ?? '';
 const sha256 = (buf: Buffer) => crypto.createHash('sha256').update(buf).digest('hex');
 const round = (x: number, d = 1) => Math.round(x * 10 ** d) / 10 ** d;
-const num = (s: string | undefined) => {
-  if (s === undefined || s.trim() === '') return null;
-  const n = Number(s.replace(',', '.'));   // SCImago uses decimal commas
-  return Number.isFinite(n) ? n : null;
-};
 
 interface LocalFileBench { source: SourceId; file: string; bytes: number; parseMs: number; processMs: number; venuesQueried: number }
 interface SourceWall { source: SourceId; wallMs: number }
 
+/**
+ * --upgrade-l3=<folder>: add the two L3 fields (the Retraction Watch cutoff and each SCImago row's ISSN)
+ * to a formula 1.0 snapshot made before they existed, WITHOUT collecting anything again. It only does so
+ * when the files in data/ are byte-identical to the ones the snapshot read (same SHA-256), so no value changes.
+ */
+function upgradeSnapshotL3(dirName: string) {
+  const dir = path.join(SNAPSHOTS_ROOT, dirName);
+  const load = (id: SourceId) => JSON.parse(fs.readFileSync(fileFor(dir, id), 'utf8')) as SnapshotFile<any>;
+  const same = (file: SnapshotFile<any>, data: string) => {
+    const buf = fs.readFileSync(data);
+    if (sha256(buf) !== file.source.sha256) throw new Error(`${data} is not the file this snapshot read (SHA-256 differs): cannot upgrade, collect a new snapshot`);
+    return buf.toString('utf8');
+  };
+  const sc = load('scimago'), rw = load('retraction-watch');
+  const scimago = parseScimago(same(sc, 'data/scimago.csv'));
+  const retraction = parseRetractionWatch(same(rw, 'data/retraction_watch.csv'));
+  for (const v of VENUES) {
+    const row = sc.venues[v.key];
+    if (v.scimagoId && row && row !== FAILED) row.issn = extractScimago(scimago, { sourceid: v.scimagoId })?.issn ?? '';
+  }
+  if (!retraction.cutoff) throw new Error('data/retraction_watch.csv has no readable RetractionDate');
+  rw.source.cutoff = retraction.cutoff;
+  fs.writeFileSync(fileFor(dir, 'scimago'), JSON.stringify(sc, null, 2));
+  fs.writeFileSync(fileFor(dir, 'retraction-watch'), JSON.stringify(rw, null, 2));
+  console.log(chalk.green(`upgraded ${rel(dir)}: Retraction Watch cutoff ${retraction.cutoff}, SCImago ISSNs added; no other value changed`));
+}
+
 export async function collectFormula1() {
+  if (arg('upgrade-l3')) return upgradeSnapshotL3(arg('upgrade-l3')!);
   const today = new Date().toISOString().slice(0, 10);
   const dirName = arg('dir') ?? `f1-${today}`;
   const DIR = path.join(SNAPSHOTS_ROOT, dirName);
@@ -70,12 +96,12 @@ export async function collectFormula1() {
   console.log(chalk.gray(`${VENUES.length} venues; OPENALEX_API_KEY ${OPENALEX_KEY() ? 'set' : 'NOT set'}, DIDCAL_MAILTO ${mailto() ? 'set' : 'NOT set'}\n`));
 
   /** Read a local CSV, timing the read + parse and hashing the bytes. */
-  const readLocal = (source: SourceId, file: string, delim = ',') => {
+  const readLocal = <P>(source: SourceId, file: string, parse: (text: string) => P) => {
     const t0 = performance.now();
     const buf = fs.readFileSync(file);
-    const rows = parseCsv(buf.toString('utf8').replace(/^﻿/, ''), delim);
+    const parsed = parse(buf.toString('utf8'));
     const parseMs = performance.now() - t0;
-    return { rows, buf, parseMs, info: (name: string, url: string, edition: string | undefined): SourceInfo => ({
+    return { parsed, buf, parseMs, info: (name: string, url: string, edition: string | undefined): SourceInfo => ({
       id: source, name, access: 'csv', url, edition, retrievedAt: fs.statSync(file).mtime.toISOString(), inputFile: file, sha256: sha256(buf), bytes: buf.length,
     }) };
   };
@@ -94,14 +120,12 @@ export async function collectFormula1() {
   {
     const t0 = performance.now();
     const file = 'data/core.csv';
-    const { rows, buf, parseMs, info } = readLocal('icore', file);
+    const { parsed, buf, parseMs, info } = readLocal('icore', file, parseIcore);
     const venues: Record<string, VenueSlot<SourceDataMap['icore']>> = {};
-    const byId = new Map(rows.map((r) => [r[0], r]));
     for (const v of VENUES.filter((x) => x.type === 'conference')) {
-      const r = v.coreId ? byId.get(v.coreId) : undefined;
-      venues[v.key] = r ? { coreId: r[0], title: r[1], acronym: r[2], edition: r[3], rank: r[4] } : null;
+      venues[v.key] = v.coreId ? extractIcore(parsed, { coreId: v.coreId }) : null;
     }
-    keep('icore', info('ICORE conference rankings (CSV export)', 'https://portal.core.edu.au/conf-ranks/', rows[0]?.[3]), venues);
+    keep('icore', info('ICORE conference rankings (CSV export)', 'https://portal.core.edu.au/conf-ranks/', parsed.edition ?? undefined), venues);
     finishLocal('icore', file, buf.length, parseMs, t0, VENUES.filter((v) => v.coreId).length);
   }
 
@@ -109,18 +133,10 @@ export async function collectFormula1() {
   {
     const t0 = performance.now();
     const file = 'data/scimago.csv';
-    const { rows, buf, parseMs, info } = readLocal('scimago', file, ';');
-    const h = rows[0].map((x) => x.trim());
-    const c = (name: string) => h.findIndex((x) => x.toLowerCase() === name.toLowerCase());
-    const [cId, cT, cS, cQ, cH, cD, cC, cCat] = [c('Sourceid'), c('Title'), c('SJR'), c('SJR Best Quartile'), c('H index'), c('Total Docs. (3years)'), c('Citations / Doc. (2years)'), c('Categories')];
-    const edition = h.find((x) => /^Total Docs\. \(\d{4}\)$/.test(x))?.match(/\d{4}/)?.[0];
-    const byId = new Map(rows.slice(1).map((r) => [r[cId], r]));
+    const { parsed, buf, parseMs, info } = readLocal('scimago', file, parseScimago);
     const venues: Record<string, VenueSlot<SourceDataMap['scimago']>> = {};
-    for (const v of VENUES) {
-      const r = v.scimagoId ? byId.get(v.scimagoId) : undefined;
-      venues[v.key] = r ? { sourceid: r[cId], title: r[cT], sjr: num(r[cS]), quartile: r[cQ], hIndex: num(r[cH]), totalDocs3y: num(r[cD]), citesPerDoc2y: num(r[cC]), categories: r[cCat] } : null;
-    }
-    keep('scimago', info('SCImago Journal Rank (CSV export)', 'https://www.scimagojr.com/journalrank.php', edition ? `SJR ${edition}` : undefined), venues);
+    for (const v of VENUES) venues[v.key] = v.scimagoId ? extractScimago(parsed, { sourceid: v.scimagoId }) : null;
+    keep('scimago', info('SCImago Journal Rank (CSV export)', 'https://www.scimagojr.com/journalrank.php', parsed.edition ?? undefined), venues);
     finishLocal('scimago', file, buf.length, parseMs, t0, VENUES.filter((v) => v.scimagoId).length);
   }
 
@@ -128,29 +144,11 @@ export async function collectFormula1() {
   {
     const t0 = performance.now();
     const file = 'data/retraction_watch.csv';
-    const { rows, buf, parseMs, info } = readLocal('retraction-watch', file);
-    const h = rows[0].map((x) => x.trim().toLowerCase());
-    const [cJ, cN, cR, cD] = [h.indexOf('journal'), h.indexOf('retractionnature'), h.indexOf('reason'), h.indexOf('retractiondate')];
-    const body = rows.slice(1);
+    const { parsed, buf, parseMs, info } = readLocal('retraction-watch', file, parseRetractionWatch);
     const venues: Record<string, VenueSlot<SourceDataMap['retraction-watch']>> = {};
-    for (const v of VENUES) {
-      if (!v.rwMatch) { venues[v.key] = null; continue; }
-      const inc = new RegExp(v.rwMatch, 'i');
-      const exc = v.rwExclude ? new RegExp(v.rwExclude, 'i') : null;
-      const hits = body.filter((r) => inc.test(r[cJ] ?? '') && !(exc?.test(r[cJ] ?? '')));
-      const byYear: Record<string, number> = {}, reasons: Record<string, number> = {};
-      let retractions = 0;
-      for (const r of hits) {
-        if (/retraction/i.test(r[cN] ?? '')) retractions++;
-        const y = (r[cD] ?? '').match(/(19|20)\d{2}/)?.[0];
-        if (y) byYear[y] = (byYear[y] ?? 0) + 1;
-        for (const x of (r[cR] ?? '').split(';').map((s) => s.replace(/^\+/, '').trim()).filter(Boolean)) reasons[x] = (reasons[x] ?? 0) + 1;
-      }
-      // Zero matches is recorded as zero records (the file was checked), not as missing
-      venues[v.key] = { records: hits.length, retractions, byYear, topReasons: Object.fromEntries(Object.entries(reasons).sort((a, b) => b[1] - a[1]).slice(0, 5)) };
-    }
+    for (const v of VENUES) venues[v.key] = v.rwMatch ? extractRetractionWatch(parsed, { rwMatch: v.rwMatch, rwExclude: v.rwExclude }) : null;
     const fileDate = fs.statSync(file).mtime.toISOString().slice(0, 10);
-    keep('retraction-watch', info('Retraction Watch database (CSV)', 'https://gitlab.com/crossref/retraction-watch-data', `file dated ${fileDate}`), venues);
+    keep('retraction-watch', { ...info('Retraction Watch database (CSV)', 'https://gitlab.com/crossref/retraction-watch-data', `file dated ${fileDate}`), ...(parsed.cutoff ? { cutoff: parsed.cutoff } : {}) }, venues);
     finishLocal('retraction-watch', file, buf.length, parseMs, t0, VENUES.filter((v) => v.rwMatch).length);
   }
 
