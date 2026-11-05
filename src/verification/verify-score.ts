@@ -3,7 +3,9 @@ import crypto from 'node:crypto';
 import { cachedResolver } from '../identity/plc-cache.js';
 import { onlineResolver, type AuditEntry, type DidResolver } from '../identity/resolve-did.js';
 import { FORMULAS } from '../scoring/compute-score.js';
+import { ANCHOR_SERVICE_KEY, anchorHeadOf, chainProblems, hashFormulaCode, loadReleases, recordHash, releaseJwsProblem, type ReleaseList } from '../scoring/formula-releases.js';
 import { decodeScoreVC } from '../scoring/read-vc.js';
+import type { ProvenanceManifest } from '../shared/types.js';
 import { findVenue, handleOf } from '../venues/registry.js';
 import { loadVenueRecords } from '../venues/venue-records.js';
 
@@ -15,6 +17,9 @@ import { loadVenueRecords } from '../venues/venue-records.js';
  *   2. Identities  issuer, subject and manifest agree on the platform and venue DIDs
  *   3. Venue       the venue DID actually belongs to the venue the manifest names
  *   4. Recompute   running the formula on those inputs reproduces the signed score
+ *   5. Formula     the formula's code is the one that was released: its code hash is in a signed,
+ *                  unbroken release chain whose head is anchored in the platform DID, and the anchor
+ *                  is older than the credential
  */
 
 export type Status = 'pass' | 'fail' | 'warn' | 'skip';
@@ -23,11 +28,13 @@ export interface VerifyReport { venueKey: string; venueDID: string; issuer: stri
 
 export interface VerifyOptions {
   resolver?: DidResolver; // where DID audit logs come from; default: plc.directory
-  timings?: { signatureMs?: number; recomputeMs?: number }; // filled in with how long those two checks took (for benchmarks)
+  timings?: { signatureMs?: number; recomputeMs?: number; formulaMs?: number }; // filled in with how long those checks took (for benchmarks)
+  releases?: ReleaseList | null; // the formula release list; default: releases/formula-releases.json
+  codeHashOf?: (formulaVersion: string) => string; // hash of this checker's own copy of a formula's code; default: hash the source file
 }
 
 /** P-256 did:key → node public key object. */
-function p256KeyFromDidKey(didKey: string): crypto.KeyObject {
+export function p256KeyFromDidKey(didKey: string): crypto.KeyObject {
   const parsed = atprotoCrypto.parseMultikey(atprotoCrypto.extractMultikey(didKey));
   if (parsed.jwtAlg !== 'ES256') throw new Error(`expected a P-256 key, got ${parsed.jwtAlg}`);
   // SPKI DER header for a P-256 point: compressed (33 bytes) or uncompressed (65 bytes)
@@ -46,7 +53,7 @@ function p256KeyFromDidKey(didKey: string): crypto.KeyObject {
  * lost an old key could backdate a credential to when that key was still valid. We also trust
  * plc.directory (or the cached copy of it) to serve the log correctly.
  */
-async function resolveSigningKey(issuer: string, signedAt: number, resolver: DidResolver): Promise<{ didKey: string; via: string }> {
+export async function resolveSigningKey(issuer: string, signedAt: number, resolver: DidResolver): Promise<{ didKey: string; via: string }> {
   let log: AuditEntry[];
   try {
     log = await resolver.auditLog(issuer);
@@ -62,6 +69,54 @@ async function resolveSigningKey(issuer: string, signedAt: number, resolver: Did
   const didKey = op.operation.verificationMethods?.['signing-1'];
   if (!didKey) throw new Error('issuer DID had no signing-1 key at signing time');
   return { didKey, via: `key from operation ${inForce.length} of ${ops.length} (${op.local && Date.parse(op.createdAt) === 0 ? 'local cache, no date' : op.createdAt.slice(0, 10)}), via ${resolver.via}${op.local ? ' [local genesis]' : ''}` };
+}
+
+/**
+ * Check 5. Returns pass/fail, or 'warn' for a credential issued before formula releases existed
+ * (no codeHash). Everything is judged from the credential, this checker's own copy of the formula
+ * code, the release list and the platform DID's audit log.
+ */
+async function checkFormula(manifest: ProvenanceManifest, nbf: number, resolver: DidResolver, opts: VerifyOptions): Promise<{ status: Status; detail: string }> {
+  if (!manifest.codeHash) return { status: 'warn', detail: 'no fingerprint (issued before releases)' };
+  const fail = (detail: string) => ({ status: 'fail' as const, detail });
+  const v = manifest.formulaVersion;
+  const list = opts.releases === undefined ? loadReleases() : opts.releases;
+  if (!list) return fail('no formula release list (releases/formula-releases.json)');
+  const idx = list.records.findIndex((r) => r.record.formulaVersion === v);
+  if (idx < 0) return fail(`formula ${v} has no release record`);
+  const rec = list.records[idx].record;
+  if (rec.codeHash !== manifest.codeHash) return fail(`the credential's codeHash ${manifest.codeHash.slice(0, 12)}… is not the released one (${rec.codeHash.slice(0, 12)}…)`);
+  let own: string;
+  try { own = (opts.codeHashOf ?? hashFormulaCode)(v); } catch (e) { return fail(`could not hash this checker's copy of formula ${v}: ${e instanceof Error ? e.message : String(e)}`); }
+  if (own !== rec.codeHash) return fail(`this checker's copy of formula ${v} hashes to ${own.slice(0, 12)}…, the release says ${rec.codeHash.slice(0, 12)}…: the code was edited`);
+
+  const chain = chainProblems(list.records.map((r) => r.record));
+  if (chain.length) return fail(`release chain broken: ${chain.join('; ')}`);
+
+  // this check needs the platform DID's audit log several times (anchors, the key at each release): fetch it once
+  const memo = new Map<string, Promise<AuditEntry[]>>();
+  const once: DidResolver = { via: resolver.via, auditLog: (did) => { let p = memo.get(did); if (!p) { p = resolver.auditLog(did); memo.set(did, p); } return p; } };
+  let log: AuditEntry[];
+  try { log = await once.auditLog(manifest.platformDID); } catch (e) { return fail(`could not get the platform DID's audit log: ${e instanceof Error ? e.message : String(e)}`); }
+
+  for (const signed of list.records) {
+    try {
+      const { didKey } = await resolveSigningKey(manifest.platformDID, Date.parse(signed.record.releasedAt) / 1000, once);
+      const problem = releaseJwsProblem(signed, p256KeyFromDidKey(didKey));
+      if (problem) return fail(`release record ${signed.record.formulaVersion}: ${problem}`);
+    } catch (e) { return fail(`release record ${signed.record.formulaVersion}: ${e instanceof Error ? e.message : String(e)}`); }
+  }
+
+  const hashes = list.records.map((r) => recordHash(r.record));
+  const head = hashes[hashes.length - 1];
+  const anchors = log.filter((e) => !e.nullified).sort((x, y) => Date.parse(x.createdAt) - Date.parse(y.createdAt))
+    .map((e) => ({ head: anchorHeadOf((e.operation.services as Record<string, unknown> | undefined)?.[ANCHOR_SERVICE_KEY]), createdAt: e.createdAt }))
+    .filter((a): a is { head: string; createdAt: string } => a.head !== null);
+  if (!anchors.some((a) => a.head === head)) return fail(`the release chain head ${head.slice(0, 12)}… is not anchored in the platform DID (anchors there: ${anchors.map((a) => a.head.slice(0, 12) + '…').join(', ') || 'none'})`);
+  // the first anchor that covers this formula's record: its head is this record's hash or a later one's
+  const first = anchors.find((a) => hashes.slice(idx).includes(a.head))!;
+  if (Math.floor(Date.parse(first.createdAt) / 1000) > nbf) return fail(`formula ${v} was anchored at ${first.createdAt}, after the credential was signed (${new Date(nbf * 1000).toISOString()})`);
+  return { status: 'pass', detail: `${v}: code ${rec.codeHash.slice(0, 12)}… matches the release and this checker's copy; ${list.records.length} release(s) chained and signed; head ${head.slice(0, 12)}… anchored ${first.createdAt.slice(0, 10)}, before signing, via ${resolver.via}` };
 }
 
 /** Resolver for the --offline flag: the cached public audit logs, nothing else. */
@@ -149,6 +204,12 @@ export async function verifyScoreJwt(jwt: string, opts: VerifyOptions = {}): Pro
   }
 
   if (opts.timings) opts.timings.recomputeMs = performance.now() - tRec;
+
+  // 5. Formula
+  const tFormula = performance.now();
+  const formulaCheck = await checkFormula(manifest, claims.nbf, resolver, opts);
+  add('Formula', formulaCheck.status, formulaCheck.detail);
+  if (opts.timings) opts.timings.formulaMs = performance.now() - tFormula;
 
   return { venueKey: manifest.venueKey, venueDID: subject.venue, issuer: claims.iss, score: subject.score, class: subject.class, checks, ok: !checks.some((c) => c.status === 'fail') };
 }

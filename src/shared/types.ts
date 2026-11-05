@@ -41,6 +41,10 @@ export interface ProvenanceManifest {
   inputs: InputValue[];
   /** Formula 1.0 and later: the sample the venue is ranked within (see ScoreCohort). */
   cohort?: ScoreCohort;
+  /** SHA-256 of the formula's source file (LF-normalised); must match the formula's release record. */
+  codeHash?: string;
+  /** The software that issued the credential: git commit, and whether the scoring code had uncommitted changes. */
+  softwareCommit?: { commit: string; dirty: boolean };
   computedAt: string;
 }
 

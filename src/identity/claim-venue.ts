@@ -318,4 +318,4 @@ export async function claimVenue(
   };
 }
 
-export { computeOperationCID, fetchCurrentOperation };
+export { computeOperationCID, fetchCurrentOperation, extractOperationFields, signUpdateOperation };

@@ -351,7 +351,8 @@ describe('formula 1.0: credentials', () => {
       assert.ok(s.payload.class);
       const r = await verify(await sign(s));
       assert.equal(r.ok, true, JSON.stringify(r.checks));
-      assert.deepEqual(r.checks.map((c) => c.status), ['pass', 'pass', 'pass', 'pass']);
+      // these test credentials carry no codeHash (issued before releases), so the fifth check, Formula, only warns
+      assert.deepEqual(r.checks.map((c) => c.status), ['pass', 'pass', 'pass', 'pass', 'warn']);
     });
   }
 

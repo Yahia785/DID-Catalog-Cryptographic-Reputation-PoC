@@ -5,6 +5,8 @@ import { performance } from 'node:perf_hooks';
 import { cachingResolver, countFetch, printSummaries, runChecks } from '../bench/score-bench.js';
 import { summarize, type Summary } from '../bench/stats.js';
 import { loadPlatform, saveJson } from '../identity/identity-store.js';
+import { hashFormulaCode, loadReleases } from './formula-releases.js';
+import { softwareCommit } from './software-commit.js';
 import { cachedResolver } from '../identity/plc-cache.js';
 import { onlineResolver } from '../identity/resolve-did.js';
 import type { ScoreCohort, ScorePayload, VenueType } from '../shared/types.js';
@@ -55,6 +57,13 @@ export async function scoreFormula1(snapshotName: string, bench: boolean) {
   const platform = loadPlatform();
   const records = loadVenueRecords();
 
+  // the code fingerprint every credential carries; it must be the one in the formula's release record
+  const codeHash = hashFormulaCode('1.0');
+  const release = loadReleases()?.records.find((r) => r.record.formulaVersion === '1.0');
+  if (!release) throw new Error('formula 1.0 has no release record: run npx tsx src/scoring/release-formulas.ts and anchor it (npx tsx src/identity/anchor-formulas.ts --live)');
+  if (release.record.codeHash !== codeHash) throw new Error(`src/scoring/formula-1.ts (${codeHash.slice(0, 12)}…) differs from its release record (${release.record.codeHash.slice(0, 12)}…): a released formula must not be edited, make a new version`);
+  const fingerprint = { codeHash, softwareCommit: softwareCommit() };
+
   console.log(chalk.bold(`\n=== DIDcal: formula 1.0 credentials ===`));
   console.log(chalk.gray(`snapshot ${snapshot.dir}   issuer ${platform.did}   output ${path.relative('.', F1_DIR)}\n`));
 
@@ -68,6 +77,7 @@ export async function scoreFormula1(snapshotName: string, bench: boolean) {
     const sizes = Object.entries(cohorts[type].values).map(([k, v]) => `${k.split('.').slice(1).join('.')} ${v.length}`).join(', ');
     console.log(chalk.gray(`  cohort ${cohorts[type].id}  (${sizes}; built in ${cohortBuildMs[type]} ms)`));
   }
+  console.log(chalk.gray(`  codeHash ${codeHash.slice(0, 16)}…   software ${fingerprint.softwareCommit.commit.slice(0, 10)}${fingerprint.softwareCommit.dirty ? ' (dirty: scoring code has uncommitted changes)' : ''}`));
   console.log();
 
   fs.mkdirSync(F1_DIR, { recursive: true });
@@ -83,7 +93,7 @@ export async function scoreFormula1(snapshotName: string, bench: boolean) {
     const t0 = performance.now();
     const inputs = buildInputs1(venue, snapshot);
     const t1 = performance.now();
-    const score = scoreFromInputs1({ venue, venueDID: record.did, platformDID: platform.did, snapshot, inputs, cohort: cohorts[venue.type], computedAt });
+    const score = scoreFromInputs1({ venue, venueDID: record.did, platformDID: platform.did, snapshot, inputs, cohort: cohorts[venue.type], computedAt, fingerprint });
     const t2 = performance.now();
     const vc = await issueScore(platform, score);
     const t3 = performance.now();

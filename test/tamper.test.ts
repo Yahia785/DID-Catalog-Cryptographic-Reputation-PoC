@@ -37,7 +37,8 @@ describe('tamper scenarios', () => {
     it(`1  honest credential (${label}): all checks pass`, async () => {
       const r = await verify(await sign(get()));
       assert.equal(r.ok, true, JSON.stringify(r.checks));
-      assert.deepEqual(r.checks.map((c) => c.status), ['pass', 'pass', 'pass', 'pass']);
+      // the fixtures' credentials carry no codeHash (issued before releases), so the fifth check, Formula, only warns
+      assert.deepEqual(r.checks.map((c) => c.status), ['pass', 'pass', 'pass', 'pass', 'warn']);
     });
   }
 

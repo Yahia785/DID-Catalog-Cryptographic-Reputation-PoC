@@ -63,8 +63,9 @@ export function buildCohort(snap: Snapshot, type: VenueType, venues: VenueEntry[
 /** Run formula 1.0 on prepared inputs and assemble the (unsigned) payload and manifest. */
 export function scoreFromInputs1(args: {
   venue: VenueEntry; venueDID: string; platformDID: string; snapshot: Snapshot; inputs: InputValue[]; cohort: ScoreCohort; computedAt: string;
+  fingerprint?: { codeHash: string; softwareCommit: { commit: string; dirty: boolean } };
 }): ReputationScore {
-  const { venue, venueDID, platformDID, snapshot, inputs, cohort, computedAt } = args;
+  const { venue, venueDID, platformDID, snapshot, inputs, cohort, computedAt, fingerprint } = args;
   const f = FORMULAS['1.0'];
   const r = f.compute(venue.type, inputs, cohort);
   return {
@@ -77,7 +78,7 @@ export function scoreFromInputs1(args: {
     manifest: {
       venueDID, venueKey: venue.key, venueType: venue.type, platformDID,
       formula: f.description, formulaVersion: '1.0',
-      sources: sourcesFor(inputs, snapshot), inputs, cohort, computedAt,
+      sources: sourcesFor(inputs, snapshot), inputs, cohort, ...(fingerprint ?? {}), computedAt,
     },
   };
 }

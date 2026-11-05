@@ -14,6 +14,8 @@
     "demo:tamper": "tsx demo/demo-tamper.ts",
     "data:check": "tsx src/scoring/data-check.ts",
     "sample:select": "tsx src/venues/select-sample.ts",
+    "formulas:release": "tsx src/scoring/release-formulas.ts",
+    "formulas:anchor": "tsx src/identity/anchor-formulas.ts",
     "bench": "tsx src/bench/measure.ts",
     "test": "tsx --test test/*.test.ts",
     "cache:plc": "tsx src/identity/cache-plc.ts",
