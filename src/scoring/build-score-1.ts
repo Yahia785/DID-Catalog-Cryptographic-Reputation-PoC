@@ -60,6 +60,14 @@ export function buildCohort(snap: Snapshot, type: VenueType, venues: VenueEntry[
   return { id: `${path.basename(snap.dir)}/${type}/${hash}`, ...body };
 }
 
+/** ISSNs (8 characters, no hyphen) for the SCImago absence rule: the registry's, else OpenAlex's issn_l and issn from the snapshot. */
+export function journalIssns(venue: VenueEntry, snap: Snapshot): string[] {
+  const plain = (s: string) => s.replace(/[^0-9Xx]/g, '').toUpperCase();
+  if (venue.issn) return [plain(venue.issn)];
+  const oa = slot(snap.sources.openalex, venue.key);
+  return [...new Set([oa?.issnL, ...(oa?.issn ?? [])].filter((x): x is string => !!x).map(plain))];
+}
+
 /**
  * Add what the L3 "Inputs" check needs to each source entry: whether the provider publishes a fixed file
  * (verifiable) and the rule that finds this venue's row in it (match). Nothing the formula reads changes.
@@ -70,15 +78,23 @@ export function withVerifiability(sources: SourceSnapshot[], venue: VenueEntry, 
       return { ...s, verifiable: 'live', verifiableReason: 'live API, no fixed edition', ...(venue.openalexId ? { match: { openalexId: venue.openalexId } } : {}) };
     }
     const file: SourceSnapshot = { ...s, verifiable: 'file' };
+    const contentHash = snap.sources[s.id as 'icore' | 'scimago']?.source.contentHash;   // order-independent hash of the rows (icore, scimago)
+    if (contentHash && (s.id === 'icore' || s.id === 'scimago')) file.contentHash = contentHash;
     if (s.id === 'icore' && venue.coreId) file.match = { coreId: venue.coreId };
     if (s.id === 'scimago' && venue.scimagoId) {
       const issn = slot(snap.sources.scimago, venue.key)?.issn;
       file.match = { sourceid: venue.scimagoId, ...(issn ? { issn } : {}) };
+    } else if (s.id === 'scimago' && venue.type === 'journal') {
+      // A journal with no SCImago id is said to be NOT in SCImago: let the checker confirm it by ISSN.
+      // (A conference with no SCImago id gets no rule: SCImago has no ISSN to search by for conferences.)
+      const issns = journalIssns(venue, snap);
+      if (issns.length) file.match = { issn: issns, absent: true };
     }
     if (s.id === 'retraction-watch' && venue.rwMatch) {
       const cutoff = snap.sources['retraction-watch']?.source.cutoff;
       if (!cutoff) throw new Error(`${snap.dir} has no Retraction Watch cutoff (the latest RetractionDate in the file): run  npx tsx src/scoring/snapshot.ts --formula=1.0 --upgrade-l3=${snap.dir.split('/').pop()}`);
-      file.match = { rwMatch: venue.rwMatch, ...(venue.rwExclude ? { rwExclude: venue.rwExclude } : {}), cutoff };
+      const commit = snap.sources['retraction-watch']?.source.commit;   // the file was pinned to a GitLab commit
+      file.match = { rwMatch: venue.rwMatch, ...(venue.rwExclude ? { rwExclude: venue.rwExclude } : {}), cutoff, ...(commit ? { commit } : {}) };
     }
     return file;
   });

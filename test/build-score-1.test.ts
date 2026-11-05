@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { buildCohort, buildInputs1, scoreFromInputs1 } from '../src/scoring/build-score-1.js';
+import { buildCohort, buildInputs1, journalIssns, scoreFromInputs1, withVerifiability } from '../src/scoring/build-score-1.js';
 import { FAILED, type Snapshot } from '../src/scoring/snapshot-store.js';
 import { findVenue } from '../src/venues/registry.js';
 
@@ -71,5 +71,54 @@ describe('formula 1.0 inputs and cohort', () => {
     assert.equal(r.payload.class, '20');                          // alone in its cohort: 0 other venues below
     assert.deepEqual(r.manifest.cohort, cohort);
     assert.equal(r.manifest.formulaVersion, '1.0');
+  });
+});
+
+describe('what the credential\'s source entries carry for the Inputs check', () => {
+  const entry = (id: string): import('../src/shared/types.js').SourceSnapshot => ({ id, name: id, access: 'csv', url: '', retrievedAt: '', file: '' });
+  const withInfo = (extra: Record<string, unknown> = {}, oaVenues: Record<string, unknown> = {}): Snapshot => ({
+    dir: 'data/snapshots/f1-test', index: { createdAt: '', dir: '', files: [], formula: '1.0' },
+    sources: {
+      icore: { ...src('icore', {}), source: { id: 'icore', name: '', access: 'csv', url: '', retrievedAt: '', contentHash: 'c1c1' } },
+      scimago: { ...src('scimago', {}), source: { id: 'scimago', name: '', access: 'csv', url: '', retrievedAt: '', contentHash: 'd2d2' } },
+      'retraction-watch': { ...src('retraction-watch', {}), source: { id: 'retraction-watch', name: '', access: 'csv', url: '', retrievedAt: '', cutoff: '2026-10-15', ...extra } },
+      openalex: src('openalex', oaVenues),
+    },
+  } as unknown as Snapshot);
+  const SCN = findVenue('SCN')!, PST = findVenue('PST')!;
+  const all = ['icore', 'scimago', 'retraction-watch', 'openalex'].map(entry);
+  const by = (list: import('../src/shared/types.js').SourceSnapshot[], id: string) => list.find((s) => s.id === id)!;
+
+  it('the content hash of ICORE and SCImago is carried next to the file hash', () => {
+    const out = withVerifiability(all, PST, withInfo());
+    assert.equal(by(out, 'icore').contentHash, 'c1c1');
+    assert.equal(by(out, 'scimago').contentHash, 'd2d2');
+    assert.equal(by(out, 'retraction-watch').contentHash, undefined);
+  });
+
+  it('the Retraction Watch rule names the pinned commit when the snapshot has one, and not otherwise', () => {
+    const commit = '827665ab699e4a798060b95c40268de417b7f2e1';
+    assert.equal(by(withVerifiability(all, SCN, withInfo({ commit })), 'retraction-watch').match!.commit, commit);
+    assert.equal('commit' in by(withVerifiability(all, SCN, withInfo()), 'retraction-watch').match!, false);
+    assert.equal(by(withVerifiability(all, SCN, withInfo()), 'retraction-watch').match!.cutoff, '2026-10-15');
+  });
+
+  it('a journal with no SCImago id gets the absence rule with its registry ISSN (no hyphen)', () => {
+    assert.equal(SCN.scimagoId, undefined);
+    assert.deepEqual(by(withVerifiability(all, SCN, withInfo()), 'scimago').match, { issn: ['19390114'], absent: true });
+  });
+
+  it('without a registry ISSN the ISSNs come from the OpenAlex snapshot (issn_l and issn, no duplicates)', () => {
+    const venue = { key: 'XJ', slug: 'xj', type: 'journal', name: 'X', role: 'Sample' } as import('../src/venues/registry.js').VenueEntry;
+    const snap = withInfo({}, { XJ: { issnL: '1234-5678', issn: ['1234-5678', '8765-432X'], worksCount: 1, citedByCount: 1, twoYrMeanCitedness: 1, hIndex: 1, worksByYear: {} } });
+    assert.deepEqual(journalIssns(venue, snap), ['12345678', '8765432X']);
+    assert.deepEqual(by(withVerifiability(all, venue, snap), 'scimago').match, { issn: ['12345678', '8765432X'], absent: true });
+    assert.deepEqual(journalIssns(venue, withInfo()), []);                       // nothing known: no rule
+    assert.equal(by(withVerifiability(all, venue, withInfo()), 'scimago').match, undefined);
+  });
+
+  it('a conference with no SCImago id gets no rule at all', () => {
+    assert.equal(PST.scimagoId, undefined);
+    assert.equal(by(withVerifiability(all, PST, withInfo()), 'scimago').match, undefined);
   });
 });

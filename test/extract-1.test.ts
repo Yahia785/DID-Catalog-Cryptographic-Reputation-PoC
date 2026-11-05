@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { describe, it } from 'node:test';
 import {
-  extractIcore, extractRetractionWatch, extractScimago, parseIcore, parseRetractionWatch, parseScimago, rwDateToIso,
+  contentHash, extractIcore, extractRetractionWatch, extractScimago, findScimagoByIssn, parseIcore, parseRetractionWatch, parseScimago, rwDateToIso,
 } from '../src/scoring/extract-1.js';
 import { VENUES } from '../src/venues/registry.js';
 
@@ -65,6 +65,42 @@ describe('extraction from small files', () => {
     assert.equal(extractRetractionWatch(f, { ...rule, cutoff: '2026-09-18' }).retractions, 1);
     assert.equal(extractRetractionWatch(f, { ...rule, cutoff: '2022-12-31' }).retractions, 0);
     assert.equal(extractRetractionWatch(f, { ...rule, cutoff: '2022-12-31' }).records, 0);
+  });
+});
+
+describe('content hash', () => {
+  const icore = '12,ACM CCS,CCS,ICORE2026,A*\n127,"Annual, Privacy",PST,ICORE2026,C\n9,Third,T,ICORE2026,B\n';
+  const scimago = 'Rank;Sourceid;Title\n1;100;"Journal A"\n2;200;"Journal B"\n3;300;"Journal C"\n';
+
+  it('does not depend on the order of the rows', () => {
+    assert.equal(contentHash('icore', icore), contentHash('icore', '9,Third,T,ICORE2026,B\n12,ACM CCS,CCS,ICORE2026,A*\n127,"Annual, Privacy",PST,ICORE2026,C\n'));
+    assert.equal(contentHash('scimago', scimago), contentHash('scimago', 'Rank;Sourceid;Title\n3;300;"Journal C"\n1;100;"Journal A"\n2;200;"Journal B"\n'));
+  });
+  it('keeps the SCImago header first: a data row cannot stand in for it', () => {
+    assert.notEqual(contentHash('scimago', scimago), contentHash('scimago', '1;100;"Journal A"\nRank;Sourceid;Title\n2;200;"Journal B"\n3;300;"Journal C"\n'));
+  });
+  it('ignores line endings, trailing newline, a BOM and surrounding spaces in cells', () => {
+    assert.equal(contentHash('icore', icore), contentHash('icore', icore.replaceAll('\n', '\r\n')));
+    assert.equal(contentHash('icore', icore), contentHash('icore', icore.trimEnd()));
+    assert.equal(contentHash('icore', icore), contentHash('icore', '\uFEFF' + icore));
+    assert.equal(contentHash('icore', icore), contentHash('icore', icore.replace('Third,T', ' Third , T ')));
+  });
+  it('changes when a cell changes, a row is added or removed, or a row is duplicated', () => {
+    const h = contentHash('icore', icore);
+    assert.notEqual(h, contentHash('icore', icore.replace(',C\n', ',B\n')));
+    assert.notEqual(h, contentHash('icore', icore + '1,New,N,ICORE2026,A\n'));
+    assert.notEqual(h, contentHash('icore', icore.split('\n').slice(1).join('\n')));
+    assert.notEqual(h, contentHash('icore', icore + '9,Third,T,ICORE2026,B\n'));
+  });
+});
+
+describe('SCImago ISSN search', () => {
+  const f = parseScimago('Rank;Sourceid;Title;Issn\n1;100;"Journal A";"19390114, 19390122"\n2;200;"Journal B";"1111111X"\n');
+  it('finds rows by any of their ISSNs, ignoring hyphens and case', () => {
+    assert.deepEqual(findScimagoByIssn(f, ['1939-0122']), [{ sourceid: '100', title: 'Journal A' }]);
+    assert.deepEqual(findScimagoByIssn(f, ['1111111x']), [{ sourceid: '200', title: 'Journal B' }]);
+    assert.deepEqual(findScimagoByIssn(f, ['22222222']), []);
+    assert.deepEqual(findScimagoByIssn(f, []), []);
   });
 });
 

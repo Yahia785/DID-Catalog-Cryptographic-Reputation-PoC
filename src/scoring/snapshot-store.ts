@@ -25,13 +25,15 @@ export interface SourceInfo {
   sha256?: string;        // for CSV sources: hash of that file (formula 1.0 snapshots)
   bytes?: number;         // for CSV sources: size of that file
   cutoff?: string;        // Retraction Watch: the latest RetractionDate in the file read (YYYY-MM-DD), its "as of" date
+  commit?: string;        // Retraction Watch: the full GitLab commit SHA of the pinned file (url is the raw URL at that commit)
+  contentHash?: string;   // icore, scimago: order-independent hash of the rows (extract-1.ts contentHash)
 }
 
 // Per-venue data from each source. null = the venue is not in that source.
 export interface IcoreData { coreId: string; title: string; acronym: string; edition: string; rank: string }
 export interface ScimagoData { title: string; sjr: number | null; quartile: string; hIndex: number | null; totalDocs3y: number | null; citesPerDoc2y: number | null; categories?: string; sourceid?: string; issn?: string }
 export interface RetractionData { records: number; retractions: number; byYear: Record<string, number>; topReasons: Record<string, number> }
-export interface OpenAlexData { worksCount: number; citedByCount: number; twoYrMeanCitedness: number | null; hIndex: number | null; worksByYear: Record<string, number>; openalexId?: string; displayName?: string }
+export interface OpenAlexData { worksCount: number; citedByCount: number; twoYrMeanCitedness: number | null; hIndex: number | null; worksByYear: Record<string, number>; openalexId?: string; displayName?: string; issnL?: string | null; issn?: string[] }
 export interface CrossrefData { totalDois: number | null; doisByYear: Record<string, number>; retractionNotices: number | null }
 export interface S2Data { venueName: string; papersByYear: Record<string, number>; cohortYear: number; cohortPapers: number; cohortCitations: number }
 

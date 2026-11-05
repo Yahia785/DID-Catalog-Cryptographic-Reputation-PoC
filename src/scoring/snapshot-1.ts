@@ -5,7 +5,8 @@ import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { buildUrl, fetchJson, mailto, setRequestObserver, type RequestRecord } from '../shared/http.js';
 import { VENUES } from '../venues/registry.js';
-import { extractIcore, extractRetractionWatch, extractScimago, parseIcore, parseRetractionWatch, parseScimago } from './extract-1.js';
+import { downloadTo, rwRawUrl } from '../verification/provider-urls.js';
+import { contentHashOfRows, extractIcore, extractRetractionWatch, extractScimago, parseIcore, parseRetractionWatch, parseScimago } from './extract-1.js';
 import {
   FAILED, SNAPSHOTS_ROOT, fileFor, rel, writeIndex,
   type SnapshotFailure, type SnapshotFile, type SourceDataMap, type SourceId, type SourceInfo, type VenueSlot,
@@ -48,8 +49,9 @@ interface LocalFileBench { source: SourceId; file: string; bytes: number; parseM
 interface SourceWall { source: SourceId; wallMs: number }
 
 /**
- * --upgrade-l3=<folder>: add the two L3 fields (the Retraction Watch cutoff and each SCImago row's ISSN)
- * to a formula 1.0 snapshot made before they existed, WITHOUT collecting anything again. It only does so
+ * --upgrade-l3=<folder>: add the L3 fields (the Retraction Watch cutoff, each SCImago row's ISSN and the
+ * order-independent content hash of the ICORE and SCImago files) to a formula 1.0 snapshot made before
+ * they existed, WITHOUT collecting anything again. It only does so
  * when the files in data/ are byte-identical to the ones the snapshot read (same SHA-256), so no value changes.
  */
 function upgradeSnapshotL3(dirName: string) {
@@ -60,7 +62,8 @@ function upgradeSnapshotL3(dirName: string) {
     if (sha256(buf) !== file.source.sha256) throw new Error(`${data} is not the file this snapshot read (SHA-256 differs): cannot upgrade, collect a new snapshot`);
     return buf.toString('utf8');
   };
-  const sc = load('scimago'), rw = load('retraction-watch');
+  const ic = load('icore'), sc = load('scimago'), rw = load('retraction-watch');
+  const icore = parseIcore(same(ic, 'data/core.csv'));
   const scimago = parseScimago(same(sc, 'data/scimago.csv'));
   const retraction = parseRetractionWatch(same(rw, 'data/retraction_watch.csv'));
   for (const v of VENUES) {
@@ -69,13 +72,54 @@ function upgradeSnapshotL3(dirName: string) {
   }
   if (!retraction.cutoff) throw new Error('data/retraction_watch.csv has no readable RetractionDate');
   rw.source.cutoff = retraction.cutoff;
+  ic.source.contentHash = contentHashOfRows('icore', icore.rows);
+  sc.source.contentHash = contentHashOfRows('scimago', scimago.rows);
+  fs.writeFileSync(fileFor(dir, 'icore'), JSON.stringify(ic, null, 2));
   fs.writeFileSync(fileFor(dir, 'scimago'), JSON.stringify(sc, null, 2));
   fs.writeFileSync(fileFor(dir, 'retraction-watch'), JSON.stringify(rw, null, 2));
-  console.log(chalk.green(`upgraded ${rel(dir)}: Retraction Watch cutoff ${retraction.cutoff}, SCImago ISSNs added; no other value changed`));
+  console.log(chalk.green(`upgraded ${rel(dir)}: Retraction Watch cutoff ${retraction.cutoff}, SCImago ISSNs and the ICORE / SCImago content hashes added; no other value changed`));
+}
+
+/**
+ * --pin-retraction-watch=<full commit SHA> --from=<snapshot folder> --dir=<new folder>
+ * Make a NEW snapshot in which Retraction Watch is read from the file as it was at one GitLab commit of
+ * crossref/retraction-watch-data (downloaded, via the raw URL with the commit SHA, to
+ * data/sources/retraction-watch-<short sha>.csv unless it is already there). ICORE, SCImago and OpenAlex
+ * are copied unchanged from --from, which is not modified. The source info records the commit, the raw
+ * URL, the SHA-256, the size and the cutoff (the latest RetractionDate in that file).
+ */
+async function pinRetractionWatch(fromName: string, commit: string, toName: string) {
+  if (!/^[0-9a-f]{40}$/.test(commit)) throw new Error('--pin-retraction-watch needs the full 40-character commit SHA');
+  const from = path.join(SNAPSHOTS_ROOT, fromName), to = path.join(SNAPSHOTS_ROOT, toName);
+  if (fs.existsSync(to) && fs.readdirSync(to).length) throw new Error(`${rel(to)} already exists and is not empty: not overwriting it`);
+  const short = commit.slice(0, 8);
+  const file = `data/sources/retraction-watch-${short}.csv`;
+  const url = rwRawUrl(commit);
+  if (!fs.existsSync(file)) {
+    const d = await downloadTo(url, file);
+    console.log(chalk.green(`downloaded ${url}`), chalk.gray(`${d.bytes} bytes in ${(d.ms / 1000).toFixed(1)} s`));
+  } else console.log(chalk.gray(`using the file already at ${file}`));
+  const buf = fs.readFileSync(file);
+  const parsed = parseRetractionWatch(buf.toString('utf8'));
+  if (!parsed.cutoff) throw new Error(`${file} has no readable RetractionDate`);
+
+  const old = JSON.parse(fs.readFileSync(fileFor(from, 'retraction-watch'), 'utf8')) as SnapshotFile<any>;
+  const venues: Record<string, VenueSlot<SourceDataMap['retraction-watch']>> = {};
+  for (const v of VENUES) venues[v.key] = v.rwMatch ? extractRetractionWatch(parsed, { rwMatch: v.rwMatch, rwExclude: v.rwExclude }) : null;
+  const source: SourceInfo = {
+    id: 'retraction-watch', name: 'Retraction Watch database (CSV, pinned to a commit)', access: 'csv', url, edition: `commit ${short}`,
+    retrievedAt: new Date().toISOString(), inputFile: file, sha256: sha256(buf), bytes: buf.length, cutoff: parsed.cutoff, commit,
+  };
+  fs.mkdirSync(to, { recursive: true });
+  for (const id of ['icore', 'scimago', 'openalex'] as SourceId[]) fs.copyFileSync(fileFor(from, id), fileFor(to, id));
+  fs.writeFileSync(fileFor(to, 'retraction-watch'), JSON.stringify({ source, years: old.years, venues }, null, 2));
+  writeIndex(to, { formula: '1.0' });
+  console.log(chalk.green(`new snapshot ${rel(to)}: Retraction Watch from commit ${commit} (sha256 ${source.sha256!.slice(0, 16)}…, ${buf.length} bytes, cutoff ${parsed.cutoff}); icore, scimago and openalex copied unchanged from ${rel(from)}`));
 }
 
 export async function collectFormula1() {
   if (arg('upgrade-l3')) return upgradeSnapshotL3(arg('upgrade-l3')!);
+  if (arg('pin-retraction-watch')) return pinRetractionWatch(arg('from') ?? '', arg('pin-retraction-watch')!, arg('dir') ?? '');
   const today = new Date().toISOString().slice(0, 10);
   const dirName = arg('dir') ?? `f1-${today}`;
   const DIR = path.join(SNAPSHOTS_ROOT, dirName);
@@ -125,7 +169,7 @@ export async function collectFormula1() {
     for (const v of VENUES.filter((x) => x.type === 'conference')) {
       venues[v.key] = v.coreId ? extractIcore(parsed, { coreId: v.coreId }) : null;
     }
-    keep('icore', info('ICORE conference rankings (CSV export)', 'https://portal.core.edu.au/conf-ranks/', parsed.edition ?? undefined), venues);
+    keep('icore', { ...info('ICORE conference rankings (CSV export)', 'https://portal.core.edu.au/conf-ranks/', parsed.edition ?? undefined), contentHash: contentHashOfRows('icore', parsed.rows) }, venues);
     finishLocal('icore', file, buf.length, parseMs, t0, VENUES.filter((v) => v.coreId).length);
   }
 
@@ -136,7 +180,7 @@ export async function collectFormula1() {
     const { parsed, buf, parseMs, info } = readLocal('scimago', file, parseScimago);
     const venues: Record<string, VenueSlot<SourceDataMap['scimago']>> = {};
     for (const v of VENUES) venues[v.key] = v.scimagoId ? extractScimago(parsed, { sourceid: v.scimagoId }) : null;
-    keep('scimago', info('SCImago Journal Rank (CSV export)', 'https://www.scimagojr.com/journalrank.php', parsed.edition ?? undefined), venues);
+    keep('scimago', { ...info('SCImago Journal Rank (CSV export)', 'https://www.scimagojr.com/journalrank.php', parsed.edition ?? undefined), contentHash: contentHashOfRows('scimago', parsed.rows) }, venues);
     finishLocal('scimago', file, buf.length, parseMs, t0, VENUES.filter((v) => v.scimagoId).length);
   }
 
@@ -163,7 +207,7 @@ export async function collectFormula1() {
       const batch = asked.slice(i, i + BATCH);
       const url = buildUrl('https://api.openalex.org/sources', {
         filter: `openalex:${batch.map((v) => v.openalexId).join('|')}`, 'per-page': BATCH,
-        select: 'id,display_name,works_count,cited_by_count,summary_stats,counts_by_year', mailto: mailto(), api_key: OPENALEX_KEY(),
+        select: 'id,display_name,issn_l,issn,works_count,cited_by_count,summary_stats,counts_by_year', mailto: mailto(), api_key: OPENALEX_KEY(),
       });
       const r = await fetchJson(url, { tag: { source: 'openalex', venues: batch.length } });
       if (r.status !== 'ok') {
@@ -179,7 +223,7 @@ export async function collectFormula1() {
         const worksByYear: Record<string, number> = {};
         for (const y of s.counts_by_year ?? []) if (YEARS.includes(y.year)) worksByYear[y.year] = y.works_count;
         venues[v.key] = {
-          openalexId: v.openalexId, displayName: s.display_name, worksCount: s.works_count, citedByCount: s.cited_by_count,
+          openalexId: v.openalexId, displayName: s.display_name, issnL: s.issn_l ?? null, issn: s.issn ?? [], worksCount: s.works_count, citedByCount: s.cited_by_count,
           twoYrMeanCitedness: s.summary_stats?.['2yr_mean_citedness'] ?? null, hIndex: s.summary_stats?.h_index ?? null, worksByYear,
         };
       }

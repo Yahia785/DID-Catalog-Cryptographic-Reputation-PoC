@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import { FORMULAS } from '../src/scoring/compute-score.js';
+import { contentHash } from '../src/scoring/extract-1.js';
 import { issueScore } from '../src/scoring/issue-score.js';
 import type { Identity, InputValue, ProvenanceManifest, ReputationScore, ScoreCohort, SourceSnapshot } from '../src/shared/types.js';
 import { JOURNAL, T_SIGNED, makeFixtures, num, str } from '../src/testing/fixtures.js';
@@ -42,11 +43,12 @@ function sources(over: Partial<Record<'icore.csv' | 'scimago.csv' | 'retraction_
 
 const base = (id: string, edition?: string, text?: string): SourceSnapshot => ({
   id, name: id, access: id === 'openalex' ? 'api' : 'csv', url: '', retrievedAt: '', file: '', ...(edition ? { edition } : {}), ...(text !== undefined ? { sha256: sha(text), bytes: text.length } : {}),
+  ...(text !== undefined && (id === 'icore' || id === 'scimago') ? { contentHash: contentHash(id, text) } : {}),
 });
 const SCN_RULE = '^security and communication networks';
 
 /** A journal credential's manifest as formula 1.0 would sign it, built to match the synthetic files (or not). */
-function journal(o: { sjr?: number; retractions?: number; sourceid?: string; edition?: string; cutoff?: string; scimagoText?: string; rwText?: string } = {}): ProvenanceManifest {
+function journal(o: { sjr?: number; retractions?: number; sourceid?: string; edition?: string; cutoff?: string; scimagoText?: string; rwText?: string; commit?: string } = {}): ProvenanceManifest {
   const inputs: InputValue[] = [
     num('scimago.sjr', o.sjr ?? 2.193, 'scimago'), num('openalex.twoYrMeanCitedness', 0.745, 'openalex'), num('openalex.worksCount', 5995, 'openalex'),
     num('rw.retractions', o.retractions ?? 3, 'retraction-watch'),
@@ -55,7 +57,7 @@ function journal(o: { sjr?: number; retractions?: number; sourceid?: string; edi
     venueDID: 'did:plc:v', venueKey: JOURNAL.key, venueType: 'journal', platformDID: 'did:plc:p', formula: '', formulaVersion: '1.0', computedAt: T_SIGNED, inputs,
     sources: [
       { ...base('scimago', o.edition ?? 'SJR 2025', o.scimagoText ?? SCIMAGO), verifiable: 'file', match: { sourceid: o.sourceid ?? '100', issn: '19390114, 19390122' } },
-      { ...base('retraction-watch', 'file dated 2026-09-24', o.rwText ?? rwFile()), verifiable: 'file', match: { rwMatch: SCN_RULE, cutoff: o.cutoff ?? '2026-09-19' } },
+      { ...base('retraction-watch', 'file dated 2026-09-24', o.rwText ?? rwFile()), verifiable: 'file', match: { rwMatch: SCN_RULE, cutoff: o.cutoff ?? '2026-09-19', ...(o.commit ? { commit: o.commit } : {}) } },
       { ...base('openalex'), verifiable: 'live', verifiableReason: 'live API, no fixed edition', match: { openalexId: 'S120683614' } },
     ],
   };
@@ -111,8 +113,46 @@ describe('Inputs check (L3): one credential against the provider\'s files', () =
     const edited = SCIMAGO.replace('"Other Journal"', '"Another Journal"');
     const r = run(journal(), sources({ 'scimago.csv': edited }));
     assert.equal(of(r, 'scimago').status, 'warn');
-    assert.match(of(r, 'scimago').reason, /file bytes differ/);
+    assert.match(of(r, 'scimago').reason, /content differs.*other rows changed/);
     assert.equal(r.status, 'warn');
+  });
+
+  describe('order-independent content hash (ICORE and SCImago)', () => {
+    const reorder = (text: string, header: boolean) => { const l = text.trimEnd().split('\n'); const h = header ? l.splice(0, 1) : []; return [...h, ...l.reverse()].join('\n') + '\n'; };
+
+    it('the same rows in a different order: pass, "same content, different byte order"', () => {
+      const ic = run(conference(), sources({ 'icore.csv': reorder(ICORE, false) }));
+      assert.equal(of(ic, 'icore').status, 'pass', of(ic, 'icore').reason);
+      assert.match(of(ic, 'icore').reason, /same content, different byte order/);
+      const sc = run(journal(), sources({ 'scimago.csv': reorder(SCIMAGO, true) }));
+      assert.equal(of(sc, 'scimago').status, 'pass', of(sc, 'scimago').reason);
+      assert.match(of(sc, 'scimago').reason, /same content, different byte order/);
+      assert.equal(sc.status, 'pass');
+    });
+
+    it('identical bytes say "same file bytes"', () => {
+      assert.match(of(run(journal(), sources()), 'scimago').reason, /same file bytes/);
+    });
+
+    it('a changed unrelated row warns (the content differs, the venue\'s values are equal)', () => {
+      const r = run(conference(), sources({ 'icore.csv': ICORE.replace('ACM CCS,CCS,ICORE2026,A*', 'ACM CCS,CCS,ICORE2026,A') }));
+      assert.equal(of(r, 'icore').status, 'warn');
+      assert.match(of(r, 'icore').reason, /content differs/);
+    });
+
+    it('a changed venue value fails, even when the rows are reordered', () => {
+      const r = run(journal(), sources({ 'scimago.csv': reorder(SCIMAGO.replace('2,193', '3,5'), true) }));
+      assert.equal(of(r, 'scimago').status, 'fail');
+      assert.match(of(r, 'scimago').reason, /scimago.sjr: the credential says 2.193, the provider's file says 3.5/);
+    });
+
+    it('a credential without a content hash falls back to the old warn on different bytes', () => {
+      const m = conference();
+      delete m.sources[0].contentHash;
+      const r = run(m, sources({ 'icore.csv': reorder(ICORE, false) }));
+      assert.equal(of(r, 'icore').status, 'warn');
+      assert.match(of(r, 'icore').reason, /no content hash/);
+    });
   });
 
   it('a different edition: not verifiable (and not a failure)', () => {
@@ -141,6 +181,42 @@ describe('Inputs check (L3): one credential against the provider\'s files', () =
     assert.match(of(r, 'scimago').reason, /Sourceid 999\) finds no row.*scimago.sjr = 2.193/);
     const ic = run({ ...conference(), sources: [{ ...conference().sources[0], match: { coreId: '99999' } }] }, sources());
     assert.equal(of(ic, 'icore').status, 'fail');
+  });
+
+  describe('SCImago absence by ISSN (journals only)', () => {
+    /** A journal credential for a journal with no SCImago id: no SJR, and the rule says it is absent. */
+    const absent = (issn: string[]): ProvenanceManifest => ({
+      venueDID: 'did:plc:v', venueKey: 'CIN', venueType: 'journal', platformDID: 'did:plc:p', formula: '', formulaVersion: '1.0', computedAt: T_SIGNED,
+      inputs: [{ metric: 'scimago.sjr', value: null, sourceId: 'scimago' }, num('openalex.twoYrMeanCitedness', 0.029, 'openalex')],
+      sources: [{ ...base('scimago', 'SJR 2025', SCIMAGO), verifiable: 'file', match: { issn, absent: true } }, { ...base('openalex'), verifiable: 'live' }],
+    });
+
+    it('a journal that is not in the file: pass, "confirmed not in SCImago"', () => {
+      const r = run(absent(['16875265']), sources());
+      assert.equal(of(r, 'scimago').status, 'pass', of(r, 'scimago').reason);
+      assert.match(of(r, 'scimago').reason, /confirmed not in SCImago/);
+      assert.equal(r.status, 'pass');
+    });
+
+    it('a journal found by ISSN (either of its ISSNs, hyphens ignored): warn, naming the row', () => {
+      for (const issn of [['19390114'], ['1939-0122'], ['16875265', '19390122']]) {
+        const r = run(absent(issn), sources());
+        assert.equal(of(r, 'scimago').status, 'warn', issn.join());
+        assert.match(of(r, 'scimago').reason, /listed in SCImago \(Security and Communication Networks, Sourceid 100\) but the credential has no SCImago input/);
+      }
+    });
+
+    it('another edition of the file is not verifiable, as for every SCImago rule', () => {
+      assert.equal(of(run(absent(['16875265']), sources({ 'scimago.csv': SCIMAGO.replace('(2025)', '(2024)') })), 'scimago').status, 'not-verifiable');
+    });
+
+    it('a conference with no SCImago id has no rule and stays "not verifiable (no matching rule)"', () => {
+      const m = conference();
+      m.sources.push({ ...base('scimago', 'SJR 2025', SCIMAGO), verifiable: 'file' });   // no match: no id and no ISSN to search by
+      const r = run(m, sources());
+      assert.equal(of(r, 'scimago').status, 'not-verifiable');
+      assert.match(of(r, 'scimago').reason, /no matching rule/);
+    });
   });
 
   it('a credential without a matching rule (issued before the Inputs check) is not verifiable', () => {
@@ -175,6 +251,42 @@ describe('Inputs check (L3): one credential against the provider\'s files', () =
     it('a file older than the credential\'s cutoff cannot judge it: not verifiable', () => {
       const r = run(journal({ cutoff: '2026-12-31' }), sources());
       assert.equal(of(r, 'retraction-watch').status, 'not-verifiable');
+    });
+
+    describe('pinned to a GitLab commit', () => {
+      const COMMIT = '827665ab699e4a798060b95c40268de417b7f2e1';
+      it('the pinned file (same hash) with matching values: pass, compared exactly', () => {
+        const r = run(journal({ commit: COMMIT }), sources());
+        assert.equal(of(r, 'retraction-watch').status, 'pass', of(r, 'retraction-watch').reason);
+        assert.match(of(r, 'retraction-watch').reason, /pinned version, commit 827665ab, same file bytes; compared exactly/);
+      });
+
+      it('the pinned file with a lowered count fails, with NO tolerance (the unpinned rule would only warn)', () => {
+        const m = journal({ commit: COMMIT, retractions: 2 });          // file has 3: one more than the credential, inside the tolerance of 1
+        assert.equal(of(run(m, sources()), 'retraction-watch').status, 'fail');
+        assert.match(of(run(m, sources()), 'retraction-watch').reason, /the pinned file \(commit 827665ab\) says 3/);
+        const unpinned = journal({ retractions: 2 });                   // same numbers, no commit: the tolerance applies
+        assert.equal(of(run(unpinned, sources()), 'retraction-watch').status, 'warn');
+      });
+
+      it('the pinned file with a raised count fails too', () => {
+        assert.equal(of(run(journal({ commit: COMMIT, retractions: 4 }), sources()), 'retraction-watch').status, 'fail');
+      });
+
+      it('a different file falls back to the count rule, and says it is not the pinned version', () => {
+        const other = rwFile([...scnRows, '5,t,Security and Communication Networks,2/2/2022 0:00,Retraction,x']);
+        const r = run(journal({ commit: COMMIT }), sources({ 'retraction_watch.csv': other }));
+        assert.equal(of(r, 'retraction-watch').status, 'warn');                 // one late addition, inside the tolerance
+        assert.match(of(r, 'retraction-watch').reason, /1 record\(s\) dated before the cutoff.*file is not the pinned version \(commit 827665ab\)/);
+        const same = run(journal({ commit: COMMIT }), sources({ 'retraction_watch.csv': rwFile([...scnRows, '5,t,Another Journal,1/1/2022 0:00,Retraction,x']) }));
+        assert.equal(of(same, 'retraction-watch').status, 'pass');
+        assert.match(of(same, 'retraction-watch').reason, /not the pinned version/);
+      });
+
+      it('a credential without a commit keeps the existing rule (no note)', () => {
+        const r = run(journal(), sources());
+        assert.doesNotMatch(of(r, 'retraction-watch').reason, /pinned/);
+      });
     });
 
     it('a different file (other bytes) is no problem by itself', () => {

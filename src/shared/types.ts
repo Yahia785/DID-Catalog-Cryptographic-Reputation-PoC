@@ -30,8 +30,20 @@ export interface SourceSnapshot {
    * retraction-watch { rwMatch, rwExclude?, cutoff }: cutoff is the latest RetractionDate in the file that
    * was read, its "as of" date (YYYY-MM-DD).
    */
-  match?: Record<string, string>;
+  match?: SourceMatch;
+  /**
+   * icore and scimago: SHA-256 of the file's rows after trimming and sorting (see contentHash in
+   * scoring/extract-1.ts), so the same rows in another order still match. Next to sha256 (raw bytes).
+   */
+  contentHash?: string;
 }
+
+/**
+ * How a venue's row is found in a provider's file (see SourceSnapshot.match). Values are strings, except
+ * the SCImago absence rule { issn: [...], absent: true }: a journal that is NOT in SCImago.
+ * retraction-watch also carries `commit`: the GitLab commit of the pinned file the values were read from.
+ */
+export type SourceMatch = Record<string, string | string[] | boolean>;
 
 /** One raw value fed into the formula, with the source it came from. */
 export interface InputValue {

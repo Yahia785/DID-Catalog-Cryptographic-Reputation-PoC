@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import { parseCsv } from '../shared/csv.js';
 import type { IcoreData, RetractionData, ScimagoData } from './snapshot-store.js';
 
@@ -16,6 +17,24 @@ const decimal = (s: string | undefined) => {
   const n = Number(s.replace(',', '.'));   // SCImago uses decimal commas
   return Number.isFinite(n) ? n : null;
 };
+
+// ── order-independent content hash (ICORE, SCImago) ──────────
+// The portals' exports list the same rows in an order that depends on the sort chosen at download, so the
+// raw file hash can differ although the content is the same. The content hash does not depend on the order.
+
+/** Order-independent hash of already parsed rows: cells trimmed and line endings normalised, the SCImago header row first, the data rows sorted. */
+export function contentHashOfRows(source: 'icore' | 'scimago', rows: string[][]): string {
+  const line = (r: string[]) => JSON.stringify(r.map((c) => c.replace(/\r\n?/g, '\n').trim()));
+  const byCodeUnit = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+  const head = source === 'scimago' ? rows.slice(0, 1).map(line) : [];
+  const data = (source === 'scimago' ? rows.slice(1) : rows).map(line).sort(byCodeUnit);
+  return crypto.createHash('sha256').update([...head, ...data].join('\n')).digest('hex');
+}
+
+/** contentHashOfRows on a file's text, parsed by the same parser the extraction uses. */
+export function contentHash(source: 'icore' | 'scimago', fileText: string): string {
+  return contentHashOfRows(source, source === 'icore' ? parseIcore(fileText).rows : parseScimago(fileText).rows);
+}
 
 // ── ICORE ────────────────────────────────────────────────────
 // data/core.csv has no header row: id, title, acronym, edition, rank, ...
@@ -62,6 +81,21 @@ export function extractScimago(file: ScimagoFile, rule: ScimagoRule): ScimagoDat
     sourceid: r[k.id], title: r[k.title], sjr: decimal(r[k.sjr]), quartile: r[k.quartile], hIndex: decimal(r[k.h]),
     totalDocs3y: decimal(r[k.docs3y]), citesPerDoc2y: decimal(r[k.citesPerDoc]), categories: r[k.categories], issn: (r[k.issn] ?? '').trim(),
   };
+}
+
+const issnKey = (s: string) => s.replace(/[^0-9Xx]/g, '').toUpperCase();
+
+/**
+ * SCImago rows whose Issn column (ISSNs without hyphens, comma separated) holds any of the given ISSNs.
+ * Used to confirm that a journal is NOT in the file.
+ */
+export function findScimagoByIssn(file: ScimagoFile, issns: string[]): { sourceid: string; title: string }[] {
+  const want = new Set(issns.map(issnKey).filter(Boolean));
+  const out: { sourceid: string; title: string }[] = [];
+  for (const r of file.rows.slice(1)) {
+    if ((r[file.col.issn] ?? '').split(',').some((x) => want.has(issnKey(x)))) out.push({ sourceid: r[file.col.id], title: r[file.col.title] });
+  }
+  return out;
 }
 
 // ── Retraction Watch ─────────────────────────────────────────

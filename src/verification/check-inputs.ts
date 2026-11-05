@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import {
-  extractIcore, extractRetractionWatch, extractScimago, parseIcore, parseRetractionWatch, parseScimago,
+  contentHashOfRows, extractIcore, extractRetractionWatch, extractScimago, findScimagoByIssn, parseIcore, parseRetractionWatch, parseScimago,
   type IcoreFile, type RetractionFile, type ScimagoFile,
 } from '../scoring/extract-1.js';
 import type { InputValue, ProvenanceManifest, SourceSnapshot } from '../shared/types.js';
@@ -18,14 +18,26 @@ import type { InputValue, ProvenanceManifest, SourceSnapshot } from '../shared/t
  *   The files are ones the checker downloaded into a folder of their choice (--sources-dir). Our own
  *   copies in data/ are never used as evidence: a folder inside data/ is refused.
  *
- * Per source: pass (hash and values match) · warn (values match, file bytes differ) · fail (a value
- * differs, or the matching rule finds no row although the credential has a value) · not-verifiable
- * (OpenAlex, file missing, or a different edition; never a failure).
- * Retraction Watch changes daily, so its hash is not compared: the rows dated on or before the
- * credential's cutoff are counted again in the file given. The same count is a pass; fewer is a fail;
- * more is a warn when it is a plausible backfill (up to LATE_ADDITION_TOLERANCE of the credential's own
- * count, at least one record), and a fail beyond that: a credential that says 0 retractions where the
- * provider's file has 948 dated before the cutoff is not a late addition.
+ * Per source: pass · warn · fail · not-verifiable (OpenAlex, file missing, or a different edition; never a failure).
+ *
+ *   ICORE and SCImago (fixed editions, compared by value and by file hash):
+ *     values differ, or the matching rule finds no row although the credential has a value  → fail
+ *     raw SHA-256 equal and values equal                                                   → pass
+ *     raw differs, content hash equal (same rows in another order) and values equal        → pass ("same content, different byte order")
+ *     content hash differs (other rows changed) but the venue's values equal               → warn
+ *
+ *   Retraction Watch changes daily:
+ *     with a pinned commit in the credential and the same file bytes (SHA-256) → the values are compared exactly, pass or fail, no tolerance;
+ *     otherwise the rows dated on or before the credential's cutoff are counted again in the file given:
+ *     the same count is a pass; fewer is a fail; more is a warn when it is a plausible backfill (up to
+ *     LATE_ADDITION_TOLERANCE of the credential's own count, at least one record), and a fail beyond that: a
+ *     credential that says 0 retractions where the provider's file has 948 dated before the cutoff is not a
+ *     late addition. If the credential names a commit and this is not that file, the reason says so.
+ *
+ *   SCImago absence ({ issn: [...], absent: true }, journals only): the credential has no SCImago input
+ *   because the journal is not listed; the ISSNs are searched in the file's Issn column. Not found: pass
+ *   ("confirmed not in SCImago"); found: warn. A CONFERENCE with no SCImago id has no such rule (SCImago
+ *   has no conference ISSN to search by), so it stays "not verifiable (no matching rule)".
  */
 export const LATE_ADDITION_TOLERANCE = 0.1;
 
@@ -64,6 +76,9 @@ export function assertNotOwnData(dir: string): string {
 type Parsed = { icore: IcoreFile; scimago: ScimagoFile; 'retraction-watch': RetractionFile };
 export interface LoadedFile<S extends FileSource = FileSource> {
   source: S; path: string; bytes: number; sha256: string; parsed: Parsed[S]; edition: string | null; cutoff: string | null;
+  /** icore, scimago: the order-independent hash of the rows, computed on first use; null for retraction-watch. */
+  contentHash: () => string | null;
+  contentHashMs?: number;
   readMs: number; hashMs: number; parseMs: number;
 }
 
@@ -87,9 +102,19 @@ export class ProviderFiles {
       const t2 = performance.now();
       const text = buf.toString('utf8');
       const base = { path: file, bytes: buf.length, sha256, readMs: t1 - t0, hashMs: t2 - t1 };
-      if (source === 'icore') { const parsed = parseIcore(text); loaded = { ...base, source, parsed, edition: parsed.edition, cutoff: null, parseMs: performance.now() - t2 } as LoadedFile; }
-      else if (source === 'scimago') { const parsed = parseScimago(text); loaded = { ...base, source, parsed, edition: parsed.edition, cutoff: null, parseMs: performance.now() - t2 } as LoadedFile; }
-      else { const parsed = parseRetractionWatch(text); loaded = { ...base, source, parsed, edition: null, cutoff: parsed.cutoff, parseMs: performance.now() - t2 } as LoadedFile; }
+      if (source === 'icore' || source === 'scimago') {
+        const parsed = source === 'icore' ? parseIcore(text) : parseScimago(text);
+        const self: LoadedFile = { ...base, source, parsed, edition: parsed.edition, cutoff: null, parseMs: performance.now() - t2, contentHash: () => null } as LoadedFile;
+        let h: string | undefined;
+        self.contentHash = () => {
+          if (h === undefined) { const t = performance.now(); h = contentHashOfRows(source, parsed.rows); self.contentHashMs = performance.now() - t; }
+          return h;
+        };
+        loaded = self;
+      } else {
+        const parsed = parseRetractionWatch(text);
+        loaded = { ...base, source, parsed, edition: null, cutoff: parsed.cutoff, parseMs: performance.now() - t2, contentHash: () => null } as LoadedFile;
+      }
     }
     this.cache.set(source, { sig, file: loaded });
     return loaded as LoadedFile<S> | null;
@@ -123,6 +148,7 @@ function checkFileSource(s: SourceSnapshot, inputs: InputValue[], files: Provide
   const nv = (reason: string) => ({ status: 'not-verifiable' as const, reason });
   if (!s.verifiable) return nv('the credential has no matching rule (issued before the Inputs check)');
   if (!s.match) return nv('the credential has no matching rule (the venue has no id in this source)');
+  const m = s.match as Record<string, string>;   // the rule fields of icore / scimago-by-id / retraction-watch are strings
   const f = files.load(id);
   if (!f) return nv(`edition not available (${SOURCE_FILES[id]} is not in the sources folder)`);
   if (id !== 'retraction-watch' && s.edition && f.edition !== s.edition) {
@@ -130,27 +156,38 @@ function checkFileSource(s: SourceSnapshot, inputs: InputValue[], files: Provide
   }
   const claimed = (metric: string) => inputs.find((i) => i.metric === metric)?.value ?? null;
   const t0 = performance.now();
+
+  // SCImago absence: the journal is said NOT to be in SCImago; search the file by ISSN
+  if (id === 'scimago' && s.match.absent === true) {
+    const issns = Array.isArray(s.match.issn) ? s.match.issn : [];
+    const hits = findScimagoByIssn(f.parsed as ScimagoFile, issns);
+    const extractMs = performance.now() - t0;
+    return hits.length
+      ? { status: 'warn', reason: `listed in SCImago (${hits.map((h) => `${h.title}, Sourceid ${h.sourceid}`).join('; ')}) but the credential has no SCImago input`, title: hits[0].title, extractMs }
+      : { status: 'pass', reason: `confirmed not in SCImago (ISSN ${issns.join(', ')} not in the file's Issn column)`, extractMs };
+  }
+
   let title: string | undefined;
   let found: Record<string, unknown> | null = null;
   const problems: string[] = [];
   let ruleText: string;
 
   if (id === 'icore') {
-    const row = extractIcore(f.parsed as IcoreFile, { coreId: s.match.coreId });
-    title = row?.title; ruleText = `coreId ${s.match.coreId}`;
+    const row = extractIcore(f.parsed as IcoreFile, { coreId: m.coreId });
+    title = row?.title; ruleText = `coreId ${m.coreId}`;
     found = row ? { 'icore.rank': row.rank } : null;
   } else if (id === 'scimago') {
-    const row = extractScimago(f.parsed as ScimagoFile, { sourceid: s.match.sourceid });
-    title = row?.title; ruleText = `Sourceid ${s.match.sourceid}`;
-    if (row && s.match.issn && row.issn !== s.match.issn) problems.push(`the row's ISSN is ${row.issn}, the credential's rule says ${s.match.issn}`);
+    const row = extractScimago(f.parsed as ScimagoFile, { sourceid: m.sourceid });
+    title = row?.title; ruleText = `Sourceid ${m.sourceid}`;
+    if (row && m.issn && row.issn !== m.issn) problems.push(`the row's ISSN is ${row.issn}, the credential's rule says ${m.issn}`);
     found = row ? { 'scimago.sjr': row.sjr, 'scimago.hIndex': row.hIndex } : null;
   } else {
     const file = f.parsed as RetractionFile;
-    ruleText = `Journal matching /${s.match.rwMatch}/i${s.match.rwExclude ? ` without /${s.match.rwExclude}/i` : ''}, rows dated up to ${s.match.cutoff}`;
-    if (file.cutoff !== null && s.match.cutoff && file.cutoff < s.match.cutoff) {
-      return nv(`edition not available (the file ends ${file.cutoff}, before the credential's cutoff ${s.match.cutoff})`);
+    ruleText = `Journal matching /${m.rwMatch}/i${m.rwExclude ? ` without /${m.rwExclude}/i` : ''}, rows dated up to ${m.cutoff}`;
+    if (file.cutoff !== null && m.cutoff && file.cutoff < m.cutoff) {
+      return nv(`edition not available (the file ends ${file.cutoff}, before the credential's cutoff ${m.cutoff})`);
     }
-    const r = extractRetractionWatch(file, { rwMatch: s.match.rwMatch, rwExclude: s.match.rwExclude, cutoff: s.match.cutoff });
+    const r = extractRetractionWatch(file, { rwMatch: m.rwMatch, rwExclude: m.rwExclude, cutoff: m.cutoff });
     found = { 'rw.retractions': r.retractions };
   }
   const extractMs = performance.now() - t0;
@@ -164,25 +201,42 @@ function checkFileSource(s: SourceSnapshot, inputs: InputValue[], files: Provide
       : result('pass', `no row for ${ruleText}, as the credential says`);
   }
 
+  // Retraction Watch pinned to a commit: the same file bytes mean an exact comparison, no tolerance
+  const commit = id === 'retraction-watch' ? m.commit : undefined;
+  const pinned = commit !== undefined && !!s.sha256 && s.sha256 === f.sha256;
+  const notPinned = commit !== undefined && !pinned ? ` · file is not the pinned version (commit ${commit.slice(0, 8)})` : '';
+
   const warns: string[] = [];
   for (const i of mine) {
     const got = found[i.metric];
-    if (id === 'retraction-watch') {
+    if (id === 'retraction-watch' && pinned) {
+      if (Number(i.value) !== Number(got)) problems.push(`${i.metric}: the credential says ${show(i.value)}, the pinned file (commit ${commit!.slice(0, 8)}) says ${show(got)}`);
+    } else if (id === 'retraction-watch') {
       const [was, now] = [Number(i.value), Number(got)];
       const tolerance = Math.max(1, Math.ceil(LATE_ADDITION_TOLERANCE * was));
-      if (now < was) problems.push(`${i.metric}: the credential says ${was}, the provider's file has only ${now} up to ${s.match.cutoff}`);
-      else if (now - was > tolerance) problems.push(`${i.metric}: the credential says ${was}, the provider's file has ${now} dated up to ${s.match.cutoff}: ${now - was} more is too many to be late additions (tolerance ${tolerance})`);
-      else if (now > was) warns.push(`${now - was} record(s) dated before the cutoff ${s.match.cutoff} were added later (${i.metric}: credential ${was}, file now ${now})`);
+      if (now < was) problems.push(`${i.metric}: the credential says ${was}, the provider's file has only ${now} up to ${m.cutoff}`);
+      else if (now - was > tolerance) problems.push(`${i.metric}: the credential says ${was}, the provider's file has ${now} dated up to ${m.cutoff}: ${now - was} more is too many to be late additions (tolerance ${tolerance})`);
+      else if (now > was) warns.push(`${now - was} record(s) dated before the cutoff ${m.cutoff} were added later (${i.metric}: credential ${was}, file now ${now})`);
     } else if (i.value !== got) {
       problems.push(`${i.metric}: the credential says ${show(i.value)}, the provider's file says ${show(got)}`);
     }
   }
-  if (problems.length) return result('fail', problems.join('; '));
-  if (warns.length) return result('warn', warns.join('; '));
+  if (problems.length) return result('fail', problems.join('; ') + notPinned);
+  if (warns.length) return result('warn', warns.join('; ') + notPinned);
   const what = mine.map((i) => `${i.metric} = ${show(claimed(i.metric))}`).join(', ');
-  if (id === 'retraction-watch') return result('pass', `${what} (rows up to ${s.match.cutoff}; the file itself changes daily, so its hash is not compared)`);
-  if (s.sha256 && s.sha256 !== f.sha256) return result('warn', `${what} match, but the file bytes differ from the one the credential read (sha256 ${f.sha256.slice(0, 12)}…, credential ${s.sha256.slice(0, 12)}…)`);
-  return result('pass', `${what} match${s.sha256 ? ', same file bytes' : ''}`);
+  if (id === 'retraction-watch') {
+    return result('pass', pinned
+      ? `${what} (the pinned version, commit ${commit!.slice(0, 8)}, same file bytes; compared exactly)`
+      : `${what} (rows up to ${m.cutoff}; the file itself changes daily, so its hash is not compared)${notPinned}`);
+  }
+  if (!s.sha256 || s.sha256 === f.sha256) return result('pass', `${what} match${s.sha256 ? ', same file bytes' : ''}`);
+  // the raw bytes differ: is it the same rows in another order?
+  if (s.contentHash) {
+    return f.contentHash() === s.contentHash
+      ? result('pass', `${what} match; same content, different byte order (content hash ${s.contentHash.slice(0, 12)}…)`)
+      : result('warn', `${what} match, but the file's content differs from the one the credential read (other rows changed: content hash ${String(f.contentHash()).slice(0, 12)}…, credential ${s.contentHash.slice(0, 12)}…)`);
+  }
+  return result('warn', `${what} match, but the file bytes differ from the one the credential read (sha256 ${f.sha256.slice(0, 12)}…, credential ${s.sha256.slice(0, 12)}…; the credential has no content hash)`);
 }
 
 /** Check a credential's inputs against the provider files in `files`. */
