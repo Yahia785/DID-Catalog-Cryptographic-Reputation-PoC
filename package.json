@@ -32,6 +32,9 @@
   },
   "devDependencies": {
     "@types/node": "^26.2.0",
+    "ethers": "^6.17.0",
+    "hardhat": "^2.29.1",
+    "solc": "^0.8.28",
     "tsx": "^4.23.12",
     "typescript": "^7.0.2"
   }
