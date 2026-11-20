@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 import { Interface, Transaction, Wallet } from 'ethers';
-import { DEV_KEY, JsonRpc, WalletChain, currentFees, deployContract, estimateNeedWei, feeOf, hashJwt, loadArtifact, modeB, runWindowed, startLocalNode, timedRecordedAt, type LocalNode, type Receipt, type TxChain } from '../src/bench/e2-lib.js';
+import { DEV_KEY, JsonRpc, WalletChain, currentFees, deployContract, estimateGas, estimateNeedWei, feeOf, gasLimitFrom, hashJwt, revertMessage, loadArtifact, modeB, runWindowed, startLocalNode, timedRecordedAt, type LocalNode, type Receipt, type TxChain } from '../src/bench/e2-lib.js';
 
 describe('hashJwt', () => {
   it('is the SHA-256 of the string as bytes32 (known example: "abc")', () => {
@@ -79,7 +79,7 @@ describe('CredentialRegistry on a local chain', { timeout: 120_000 }, () => {
   after(async () => { await node?.stop(); });
 
   const record = async (h: string) => {
-    const chain = new WalletChain(rpc, wallet, address, chainId, await currentFees(rpc), 5, art.abi);
+    const chain = new WalletChain(rpc, wallet, address, chainId, await currentFees(rpc), 5, art.abi, 120_000n);
     const nonce = Number(BigInt(await rpc.send('eth_getTransactionCount', [wallet.address, 'pending'])));
     return chain.waitForReceipt(await chain.send(h, nonce));
   };
@@ -114,5 +114,32 @@ describe('CredentialRegistry on a local chain', { timeout: 120_000 }, () => {
     } catch { rejected = true; }
     assert.ok(rejected, 'the duplicate was accepted');
     assert.equal((await timedRecordedAt(rpc, address, art.abi, [h])).timestamps.length, 1);
+  });
+});
+
+describe('gas limits from estimates', () => {
+  it('gasLimitFrom is estimate × 1.25, rounded up', () => {
+    assert.equal(gasLimitFrom(100_000n), 125_000n);
+    assert.equal(gasLimitFrom(1n), 2n);
+    assert.equal(gasLimitFrom(47_001n), 58_752n);      // 58751.25 -> 58752
+    assert.equal(gasLimitFrom(0n), 0n);
+  });
+  it('gasLimitFrom is never below the estimate and handles large values exactly', () => {
+    for (const e of [1n, 7n, 21_000n, 999_999n]) assert.ok(gasLimitFrom(e) >= e);
+    assert.equal(gasLimitFrom(2n ** 60n), (2n ** 60n * 5n) / 4n);
+  });
+  it('revertMessage gives gas used and limit, and flags out of gas', () => {
+    const m = revertMessage('deployment', '0xabc', 500_000n, 500_000n);
+    assert.match(m, /status 0/); assert.match(m, /gas used 500000/); assert.match(m, /gas limit 500000/); assert.match(m, /out of gas/);
+    assert.doesNotMatch(revertMessage('record(x)', '0xabc', 30_000n, 60_000n), /out of gas/);
+    assert.match(revertMessage('record(x)', '0xabc', 1n), /gas limit unknown/);
+  });
+  it('estimateGas sends eth_estimateGas, with the state override as third parameter when given', async () => {
+    const calls: { method: string; params: unknown[] }[] = [];
+    const rpc = { send: async (method: string, params: unknown[]) => { calls.push({ method, params }); return '0xc350'; } } as unknown as JsonRpc;
+    assert.equal(await estimateGas(rpc, { from: '0xf', data: '0x00' }), 50_000n);
+    assert.deepEqual(calls[0].params, [{ from: '0xf', data: '0x00' }, 'latest']);
+    await estimateGas(rpc, { from: '0xf', to: '0xt', data: '0x01' }, { '0xt': { code: '0x60' } });
+    assert.deepEqual(calls[1].params, [{ from: '0xf', to: '0xt', data: '0x01' }, 'latest', { '0xt': { code: '0x60' } }]);
   });
 });

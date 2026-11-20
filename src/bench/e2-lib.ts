@@ -14,6 +14,7 @@ import { Interface, Transaction, Wallet, getCreateAddress } from 'ethers';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const CHAIN_DIR = path.join(HERE, 'e2-chain');
+export const AMSTERDAM_DIR = path.join(CHAIN_DIR, 'amsterdam');
 export const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 // ── hashing and artifact ─────────────────────────────────────
@@ -80,6 +81,8 @@ export interface TxChain {
   send(h: string, nonce: number): Promise<string>;
   /** Resolves when the transaction is included in a block. */
   waitForReceipt(txHash: string): Promise<Receipt>;
+  /** Gas limit set on every record() transaction (for error messages). */
+  readonly gasLimit?: bigint;
   /** Time spent backing off after rate limits so far (left out of every timing). */
   backoffMs(): number;
   now(): number;
@@ -87,6 +90,12 @@ export interface TxChain {
 export interface TxResult {
   index: number; hash: string; txHash: string; nonce: number; ms: number; sentAt: number; includedAt: number;
   blockNumber: number; gasUsed: number; effectiveGasPrice: bigint; status: boolean;
+}
+
+/** Message for a transaction with status 0: always says how much gas was used and what the limit was. */
+export function revertMessage(what: string, txHash: string, gasUsed: bigint, gasLimit?: bigint): string {
+  const hit = gasLimit !== undefined && gasUsed >= gasLimit ? ' (all of the gas limit was used: out of gas)' : '';
+  return `${what} failed, status 0 (tx ${txHash}): gas used ${gasUsed}, gas limit ${gasLimit ?? 'unknown'}${hit}`;
 }
 
 /** Mode A: one after another. Per credential: time from send until included, minus any backoff. */
@@ -99,7 +108,7 @@ export async function modeA(chain: TxChain, hashes: string[], startNonce: number
     const t1 = chain.now();
     const r: TxResult = { index: i, hash: hashes[i], txHash, nonce: startNonce + i, ms: t1 - t0 - (chain.backoffMs() - b0), sentAt: t0, includedAt: t1,
       blockNumber: rc.blockNumber, gasUsed: Number(rc.gasUsed), effectiveGasPrice: rc.effectiveGasPrice, status: rc.status };
-    if (!rc.status) throw new Error(`record(${hashes[i]}) reverted (tx ${txHash})`);
+    if (!rc.status) throw new Error(revertMessage(`record(${hashes[i]})`, txHash, rc.gasUsed, chain.gasLimit));
     out.push(r); onProgress?.(i, r);
   }
   return out;
@@ -141,7 +150,7 @@ export async function modeB(chain: TxChain, hashes: string[], startNonce: number
     const done = chain.waitForReceipt(txHash).then((rc) => {
       waiting--;
       const t1 = chain.now();
-      if (!rc.status) throw new Error(`record(${hashes[i]}) reverted (tx ${txHash})`);
+      if (!rc.status) throw new Error(revertMessage(`record(${hashes[i]})`, txHash, rc.gasUsed, chain.gasLimit));
       return { index: i, hash: hashes[i], txHash, nonce: startNonce + i, ms: t1 - t0 - (chain.backoffMs() - bs), sentAt: t0, includedAt: t1,
         blockNumber: rc.blockNumber, gasUsed: Number(rc.gasUsed), effectiveGasPrice: rc.effectiveGasPrice, status: rc.status };
     }, (e) => { waiting--; throw e; });
@@ -154,8 +163,22 @@ export async function modeB(chain: TxChain, hashes: string[], startNonce: number
 
 // ── real chain implementation ────────────────────────────────
 export interface Fees { maxFeePerGas: bigint; maxPriorityFeePerGas: bigint }
-export const RECORD_GAS_LIMIT = 120_000n;
-export const DEPLOY_GAS_LIMIT = 500_000n;
+
+/** Gas limit from an estimate: 25% headroom, rounded up. The limit is not what is paid: only gas used is charged. */
+export function gasLimitFrom(estimate: bigint): bigint {
+  return (estimate * 125n + 99n) / 100n;
+}
+
+/** eth_estimateGas for a call or contract creation (to omitted). `stateOverride` is the optional third parameter. */
+export async function estimateGas(rpc: JsonRpc, tx: { from: string; to?: string | null; data: string }, stateOverride?: Record<string, unknown>): Promise<bigint> {
+  const call: Record<string, string> = { from: tx.from, data: tx.data };
+  if (tx.to) call.to = tx.to;
+  const params: unknown[] = stateOverride ? [call, 'latest', stateOverride] : [call, 'latest'];
+  return BigInt(await rpc.send<string>('eth_estimateGas', params));
+}
+
+/** Upper value per record() used by the Sepolia dry run when the node rejects state overrides. */
+export const RECORD_GAS_UPPER = 300_000n;
 
 export function parseReceipt(r: any): Receipt {
   return { txHash: r.transactionHash, blockNumber: Number(BigInt(r.blockNumber)), gasUsed: BigInt(r.gasUsed), effectiveGasPrice: BigInt(r.effectiveGasPrice ?? 0), status: BigInt(r.status) === 1n, contractAddress: r.contractAddress ?? null };
@@ -164,13 +187,13 @@ export function parseReceipt(r: any): Receipt {
 export class WalletChain implements TxChain {
   private readonly iface: Interface;
   constructor(readonly rpc: JsonRpc, private readonly wallet: Wallet, private readonly contract: string, private readonly chainId: bigint,
-    private readonly fees: Fees, private readonly pollMs: number, abi: unknown[], private readonly timeoutMs = 15 * 60_000) {
+    private readonly fees: Fees, private readonly pollMs: number, abi: unknown[], readonly gasLimit: bigint, private readonly timeoutMs = 15 * 60_000) {
     this.iface = new Interface(abi as any);
   }
   now() { return performance.now(); }
   backoffMs() { return this.rpc.backoffMs; }
   async send(h: string, nonce: number): Promise<string> {
-    const raw = await this.wallet.signTransaction({ type: 2, chainId: this.chainId, nonce, to: this.contract, value: 0n, data: this.iface.encodeFunctionData('record', [h]), gasLimit: RECORD_GAS_LIMIT, ...this.fees });
+    const raw = await this.wallet.signTransaction({ type: 2, chainId: this.chainId, nonce, to: this.contract, value: 0n, data: this.iface.encodeFunctionData('record', [h]), gasLimit: this.gasLimit, ...this.fees });
     await this.rpc.send('eth_sendRawTransaction', [raw]);
     return Transaction.from(raw).hash!;
   }
@@ -196,17 +219,20 @@ export async function currentFees(rpc: JsonRpc): Promise<Fees & { baseFeePerGas:
   return { baseFeePerGas: base, maxPriorityFeePerGas: tip, maxFeePerGas: 3n * base + tip };
 }
 
+/** Deploy. The gas is estimated first (before the clock starts) and the limit is gasLimitFrom(estimate). */
 export async function deployContract(rpc: JsonRpc, wallet: Wallet, chainId: bigint, art: Artifact, fees: Fees, pollMs: number) {
   const nonce = Number(BigInt(await rpc.send('eth_getTransactionCount', [wallet.address, 'pending'])));
-  const raw = await wallet.signTransaction({ type: 2, chainId, nonce, to: null, value: 0n, data: art.bytecode, gasLimit: DEPLOY_GAS_LIMIT, ...fees });
+  const gasEstimate = await estimateGas(rpc, { from: wallet.address, data: art.bytecode });
+  const gasLimit = gasLimitFrom(gasEstimate);
+  const raw = await wallet.signTransaction({ type: 2, chainId, nonce, to: null, value: 0n, data: art.bytecode, gasLimit, ...fees });
   const t0 = performance.now(), b0 = rpc.backoffMs;
   await rpc.send('eth_sendRawTransaction', [raw]);
   const txHash = Transaction.from(raw).hash!;
   const rc = await waitForReceipt(rpc, txHash, pollMs);
   const ms = performance.now() - t0 - (rpc.backoffMs - b0);
-  if (!rc.status || !rc.contractAddress) throw new Error(`deployment failed (tx ${txHash})`);
+  if (!rc.status || !rc.contractAddress) throw new Error(revertMessage('deployment', txHash, rc.gasUsed, gasLimit));
   if (rc.contractAddress.toLowerCase() !== getCreateAddress({ from: wallet.address, nonce }).toLowerCase()) throw new Error('deployed address differs from the expected one');
-  return { address: rc.contractAddress, txHash, ms, gasUsed: Number(rc.gasUsed), blockNumber: rc.blockNumber };
+  return { address: rc.contractAddress, txHash, ms, gasUsed: Number(rc.gasUsed), blockNumber: rc.blockNumber, gasEstimate, gasLimit };
 }
 
 // ── finality (Sepolia) ───────────────────────────────────────
@@ -256,11 +282,31 @@ export function hardhatVersion(): string {
   return JSON.parse(fs.readFileSync(path.resolve('node_modules/hardhat/package.json'), 'utf8')).version;
 }
 
-export interface LocalNode { url: string; tool: string; version: string; clientVersion: string; stop(): Promise<void> }
+/** Amsterdam EIPs that Hardhat's documentation (hardhat.org/docs/reference/amsterdam-support) lists as supported. The page names no version. */
+export const AMSTERDAM_EIPS: string[] = [
+  'EIP-2780: Resource-based intrinsic transaction gas', 'EIP-7708: ETH transfers emit logs', 'EIP-7778: Block Gas Accounting without Refunds',
+  'EIP-7843: SLOTNUM opcode', 'EIP-7928: Block-Level Access Lists', 'EIP-7954: Increase Maximum Contract Size', 'EIP-7976: Increase Calldata Floor Cost',
+  'EIP-7981: Increase Access List Cost', 'EIP-7997: Deterministic Factory Contract', 'EIP-8024: Backward Compatible SWAPN, DUPN, EXCHANGE',
+  'EIP-8037: State Creation Gas Cost Increase', 'EIP-8038: State-Access Gas Cost Update', 'EIP-8246: Remove SELFDESTRUCT Burn',
+];
+
+export interface LocalNode {
+  url: string; tool: string; version: string; clientVersion: string; stop(): Promise<void>;
+  /** Hardfork / gas rules the node follows; for Hardhat 3 also the EDR (simulation engine) version and the EIPs Hardhat lists as supported. */
+  hardfork: string; edrVersion: string | null; supportedEips: string[] | null;
+}
+export type LocalKind = 'hardhat2' | 'hardhat3-amsterdam';
+
 /** Start `hardhat node` (one block per transaction), wait until it answers, return a handle that stops it. */
-export async function startLocalNode(port = 8599): Promise<LocalNode> {
-  const bin = createRequire(import.meta.url).resolve('hardhat/internal/cli/bootstrap');
-  const child = spawn(process.execPath, [bin, 'node', '--hostname', '127.0.0.1', '--port', String(port), '--config', path.join(CHAIN_DIR, 'hardhat.config.cjs')], {
+export async function startLocalNode(port = 8599, kind: LocalKind = 'hardhat2'): Promise<LocalNode> {
+  const amsterdam = kind === 'hardhat3-amsterdam';
+  const hhDir = path.join(AMSTERDAM_DIR, 'node_modules', 'hardhat');
+  const bin = amsterdam ? path.join(hhDir, 'dist', 'src', 'cli.js') : createRequire(import.meta.url).resolve('hardhat/internal/cli/bootstrap');
+  if (!fs.existsSync(bin)) throw new Error(amsterdam ? `Hardhat 3 is not installed: run  npm install  in ${path.relative('.', AMSTERDAM_DIR)}` : `hardhat not found at ${bin}`);
+  const args = amsterdam
+    ? ['node', '--hostname', '127.0.0.1', '--port', String(port), '--config', path.join(AMSTERDAM_DIR, 'hardhat.config.js'), '--network', 'default']
+    : ['node', '--hostname', '127.0.0.1', '--port', String(port), '--config', path.join(CHAIN_DIR, 'hardhat.config.cjs')];
+  const child = spawn(process.execPath, [bin, ...args], {
     cwd: path.resolve('.'), env: { ...process.env, HARDHAT_DISABLE_TELEMETRY_PROMPT: 'true' }, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
   });
   let log = '';
@@ -283,7 +329,9 @@ export async function startLocalNode(port = 8599): Promise<LocalNode> {
     await sleep(150);
   }
   const clientVersion = await rpc.send<string>('web3_clientVersion');
-  return { url, tool: 'Hardhat Network (hardhat node)', version: hardhatVersion(), clientVersion, stop };
+  if (!amsterdam) return { url, tool: 'Hardhat Network (hardhat node)', version: hardhatVersion(), clientVersion, stop, hardfork: 'Hardhat 2 default (older rules than Sepolia now)', edrVersion: null, supportedEips: null };
+  const edr = JSON.parse(fs.readFileSync(path.join(AMSTERDAM_DIR, 'node_modules', '@nomicfoundation', 'edr', 'package.json'), 'utf8')).version as string;
+  return { url, tool: 'Hardhat 3 simulated L1 (hardhat node)', version: JSON.parse(fs.readFileSync(path.join(hhDir, 'package.json'), 'utf8')).version, clientVersion, stop, hardfork: 'amsterdam', edrVersion: edr, supportedEips: AMSTERDAM_EIPS };
 }
 
 // ── mainnet fee context (read only) ──────────────────────────

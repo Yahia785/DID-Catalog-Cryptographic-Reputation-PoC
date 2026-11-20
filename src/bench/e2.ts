@@ -1,9 +1,9 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { Wallet, formatEther } from 'ethers';
+import { Interface, Wallet, formatEther } from 'ethers';
 import {
-  DEV_KEY, JsonRpc, RECORD_GAS_LIMIT, WalletChain, currentFees, deployContract, estimateNeedWei, feeOf, hashJwt,
+  DEV_KEY, JsonRpc, RECORD_GAS_UPPER, WalletChain, currentFees, deployContract, estimateGas, estimateNeedWei, feeOf, gasLimitFrom, hashJwt,
   loadArtifact, mainnetFeeContext, modeA, modeB, startLocalNode, timedRecordedAt, waitFinality, type LocalNode,
 } from './e2-lib.js';
 import { summarize, type Summary } from './stats.js';
@@ -12,7 +12,8 @@ import { summarize, type Summary } from './stats.js';
  * Benchmark E2: the same workload as DIDcal, on a blockchain. Record the SHA-256 fingerprint of each of the 100 signed
  * credentials in a minimal contract (CredentialRegistry) and measure what that costs. No fee is paid on mainnet.
  *
- *   npx tsx src/bench/e2.ts --chain=local                       local single-node development chain (Hardhat network), started and stopped here
+ *   npx tsx src/bench/e2.ts --chain=local                       local single-node development chain (Hardhat 2 network, older gas rules), started and stopped here
+ *   npx tsx src/bench/e2.ts --chain=local-amsterdam             the same on Hardhat 3 with the amsterdam hardfork (Sepolia's current gas rules)
  *   npx tsx src/bench/e2.ts --chain=sepolia --new-wallet        create output/e2/wallet.json (git-ignored), print only the address
  *   npx tsx src/bench/e2.ts --chain=sepolia --dry-run           balance and estimated need; sends nothing
  *   npx tsx src/bench/e2.ts --chain=sepolia --yes               the real Sepolia run (needed for any real Sepolia run)
@@ -34,7 +35,11 @@ const DEFAULT_SEPOLIA_RPC = 'https://ethereum-sepolia-rpc.publicnode.com';
 const WINDOW = 10;                                    // Mode B: never more than this many waiting
 const LABEL = 'Single user, one laptop.';
 const SEPOLIA_PACE_MS = 150;                          // gap between consecutive requests in the check
-const RECORD_GAS_FALLBACK = 47_000, DEPLOY_GAS_FALLBACK = 150_000;   // used by the dry run only when no local run exists
+const DUMMY_ADDRESS = '0x1111111111111111111111111111111111111111';   // dry run: where the runtime code is placed by a state override
+const GAS_ESTIMATE_HASH = hashJwt('gas-estimate');    // fingerprint used only to estimate record(); not in the workload
+type ChainName = 'local' | 'local-amsterdam' | 'sepolia';
+const SEPOLIA_RULES = 'Glamsterdam (Amsterdam execution layer), active on Sepolia since 2026-10-06; includes EIP-8037 (higher gas for new state: deployed code, new storage slots) and EIP-8038 (state-access gas)';
+const GAS_NOTE = 'Gas figures from chains that follow different gas rules (hardforks) are not directly comparable: the same contract and the same calls cost different amounts of gas.';
 
 const log = (s = '') => console.log(s);
 const die = (s: string): never => { console.error(s); process.exit(1); };
@@ -67,21 +72,30 @@ function loadCredentials() {
   return { files, jwts, hashesA, hashesB, totalBytes: jwts.reduce((a, j) => a + Buffer.byteLength(j), 0) };
 }
 
-/** Gas figures for the dry run: from the newest local run if there is one, else conservative constants. */
-function localGasFigures(): { deployGas: number; recordGas: number; from: string } {
-  const dir = path.resolve('output/bench');
-  const files = fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => /^e2-local-.*\.json$/.test(f)).sort() : [];
-  if (files.length) {
-    const j = JSON.parse(fs.readFileSync(path.join(dir, files[files.length - 1]), 'utf8'));
-    return { deployGas: j.deploy.gasUsed, recordGas: j.modeA.gasUsed.max, from: files[files.length - 1] };
-  }
-  return { deployGas: DEPLOY_GAS_FALLBACK, recordGas: RECORD_GAS_FALLBACK, from: 'built-in constants (no local run found)' };
-}
-
 const origin = (u: string) => { try { return new URL(u).origin; } catch { return 'unknown'; } };
 const gwei = (wei: bigint) => (Number(wei) / 1e9).toString();
 
 // ── Sepolia setup shared by dry run and real run ─────────────
+interface RecordEstimate { gas: bigint; basis: string }
+
+/** Runtime code of the contract: an eth_call without `to` runs the creation code and returns what would be stored. */
+async function runtimeCode(rpc: JsonRpc, from: string, initCode: string): Promise<string> {
+  return rpc.send<string>('eth_call', [{ from, data: initCode }, 'latest']);
+}
+
+/** Estimate record() before the contract exists: place the runtime code at a dummy address with a state override. If the node refuses, use an upper value. */
+async function estimateRecordWithOverride(rpc: JsonRpc, from: string, art: ReturnType<typeof loadArtifact>): Promise<RecordEstimate> {
+  const data = new Interface(art.abi as any).encodeFunctionData('record', [GAS_ESTIMATE_HASH]);
+  try {
+    const code = await runtimeCode(rpc, from, art.bytecode);
+    if (!code || code === '0x') throw new Error('no runtime code returned');
+    const gas = await estimateGas(rpc, { from, to: DUMMY_ADDRESS, data }, { [DUMMY_ADDRESS]: { code } });
+    return { gas, basis: `eth_estimateGas with a state override (runtime code at ${DUMMY_ADDRESS})` };
+  } catch (e) {
+    return { gas: RECORD_GAS_UPPER, basis: `fixed upper value ${RECORD_GAS_UPPER}: the node did not accept a state-override estimate (${(e as Error).message.slice(0, 160)})` };
+  }
+}
+
 async function sepoliaContext() {
   try { process.loadEnvFile('.env'); } catch { /* no .env */ }
   const url = process.env.SEPOLIA_RPC_URL || DEFAULT_SEPOLIA_RPC;
@@ -89,12 +103,16 @@ async function sepoliaContext() {
   const chainId = BigInt(await rpc.send('eth_chainId'));
   if (chainId !== SEPOLIA_ID) die(`the RPC at ${origin(url)} reports chain id ${chainId}, not Sepolia (${SEPOLIA_ID}): stopping`);
   const wallet = loadWallet();
+  const art = loadArtifact();
   const balance = BigInt(await rpc.send('eth_getBalance', [wallet.address, 'latest']));
   const fees = await currentFees(rpc);
-  const g = localGasFigures();
+  const deployEstimate = await estimateGas(rpc, { from: wallet.address, data: art.bytecode });
+  const recordEstimate = await estimateRecordWithOverride(rpc, wallet.address, art);
   const price = fees.baseFeePerGas + fees.maxPriorityFeePerGas;
-  const need = estimateNeedWei(g.deployGas, g.recordGas, 200, price, 50);
-  return { url, rpc, chainId, wallet, balance, fees, g, price, need, usingDefaultRpc: !process.env.SEPOLIA_RPC_URL };
+  const deployLimit = gasLimitFrom(deployEstimate), recordLimit = gasLimitFrom(recordEstimate.gas);
+  // the need is computed from the gas limits (an upper value of what can be charged), not from the bare estimates
+  const need = estimateNeedWei(Number(deployLimit), Number(recordLimit), 200, price, 50);
+  return { url, rpc, chainId, wallet, balance, fees, price, need, deployEstimate, deployLimit, recordEstimate, recordLimit, usingDefaultRpc: !process.env.SEPOLIA_RPC_URL };
 }
 
 async function dryRun() {
@@ -103,11 +121,12 @@ async function dryRun() {
   log(`  RPC: ${origin(c.url)}${c.usingDefaultRpc ? ' (public default; set SEPOLIA_RPC_URL in .env to use another)' : ' (SEPOLIA_RPC_URL)'}`);
   log(`  wallet ${c.wallet.address}: balance ${formatEther(c.balance)} ETH`);
   log(`  gas price now: base fee ${gwei(c.fees.baseFeePerGas)} gwei + tip ${gwei(c.fees.maxPriorityFeePerGas)} gwei = ${gwei(c.price)} gwei`);
-  log(`  gas figures from: ${c.g.from}: deploy ${c.g.deployGas}, record ${c.g.recordGas} (per transaction, upper value)`);
-  log(`  estimate = (deploy gas + 200 × record gas) × gas price × 1.5`);
-  log(`           = (${c.g.deployGas} + 200 × ${c.g.recordGas}) × ${gwei(c.price)} gwei × 1.5 = ${formatEther(c.need)} ETH`);
-  const reserve = BigInt(WINDOW) * RECORD_GAS_LIMIT * c.fees.maxFeePerGas;
-  log(`  the node also reserves gas limit × max fee for each waiting transaction: ${WINDOW} × ${RECORD_GAS_LIMIT} × ${gwei(c.fees.maxFeePerGas)} gwei = ${formatEther(reserve)} ETH at the peak of Mode B`);
+  log(`  deploy: eth_estimateGas ${c.deployEstimate} -> gas limit ${c.deployLimit} (estimate × 1.25)`);
+  log(`  record: ${c.recordEstimate.gas} -> gas limit ${c.recordLimit} (× 1.25); basis: ${c.recordEstimate.basis}`);
+  log(`  estimate = (deploy limit + 200 × record limit) × gas price × 1.5`);
+  log(`           = (${c.deployLimit} + 200 × ${c.recordLimit}) × ${gwei(c.price)} gwei × 1.5 = ${formatEther(c.need)} ETH`);
+  const reserve = BigInt(WINDOW) * c.recordLimit * c.fees.maxFeePerGas;
+  log(`  the node also reserves gas limit × max fee for each waiting transaction: ${WINDOW} × ${c.recordLimit} × ${gwei(c.fees.maxFeePerGas)} gwei = ${formatEther(reserve)} ETH at the peak of Mode B`);
   const enough = c.balance >= c.need && c.balance >= reserve;
   log(`  balance is ${enough ? 'ENOUGH' : 'NOT enough'} (needs ${formatEther(c.need > reserve ? c.need : reserve)} ETH)`);
   log(`  expected duration: Mode A ~${(100 * 12) / 60}–${(100 * 24) / 60} min, finality ~13–20 min more, Mode B a few minutes`);
@@ -117,7 +136,7 @@ async function dryRun() {
 const sumRow = (name: string, s: Summary | null, d = 1) => (s ? `| ${name} | ${s.n} | ${s.mean.toFixed(d)} | ${s.median.toFixed(d)} | ${s.p95.toFixed(d)} | ${s.min.toFixed(d)} | ${s.max.toFixed(d)} | ${s.sd.toFixed(d)} |` : `| ${name} | 0 | | | | | | |`);
 const SUM_HEAD = '| | n | mean | median | p95 | min | max | SD |\n|---|---:|---:|---:|---:|---:|---:|---:|';
 
-async function runBench(chain: 'local' | 'sepolia') {
+async function runBench(chain: ChainName) {
   const startedAt = new Date().toISOString();
   const work = loadCredentials();
   const art = loadArtifact();
@@ -126,11 +145,11 @@ async function runBench(chain: 'local' | 'sepolia') {
   let node: LocalNode | null = null, rpcUrl: string, wallet: Wallet, pollMs: number, paceMs: number, rpcLabel: string, usingDefaultRpc = false;
   let tool: { name: string; version: string; client: string };
   let sepoliaPreflight: Awaited<ReturnType<typeof sepoliaContext>> | null = null;
-  if (chain === 'local') {
-    node = await startLocalNode();
+  if (chain !== 'sepolia') {
+    node = await startLocalNode(8599, chain === 'local-amsterdam' ? 'hardhat3-amsterdam' : 'hardhat2');
     rpcUrl = node.url; wallet = new Wallet(DEV_KEY); pollMs = 1; paceMs = 0; rpcLabel = `${node.url} (started by this script)`;
     tool = { name: node.tool, version: node.version, client: node.clientVersion };
-    log(`local node: ${node.clientVersion} (hardhat ${node.version}) at ${node.url}`);
+    log(`local node: ${node.clientVersion} (hardhat ${node.version}, hardfork: ${node.hardfork}${node.edrVersion ? `, EDR ${node.edrVersion}` : ''}) at ${node.url}`);
   } else {
     sepoliaPreflight = await sepoliaContext();
     if (sepoliaPreflight.balance < sepoliaPreflight.need) die(`balance ${formatEther(sepoliaPreflight.balance)} ETH is below the estimated need ${formatEther(sepoliaPreflight.need)} ETH: run --dry-run, fund ${sepoliaPreflight.wallet.address}, then try again`);
@@ -151,10 +170,16 @@ async function runBench(chain: 'local' | 'sepolia') {
     log('deploying...');
     const dfees = await currentFees(rpc);
     const dep = await deployContract(rpc, wallet, chainId, art, dfees, pollMs);
-    log(`  deployed at ${dep.address}: ${(dep.ms).toFixed(0)} ms, gas ${dep.gasUsed}`);
+    log(`  deployed at ${dep.address}: ${(dep.ms).toFixed(0)} ms, gas ${dep.gasUsed} (estimate ${dep.gasEstimate}, limit ${dep.gasLimit})`);
+
+    // estimate record() once, after deployment and before Mode A, outside every timing
+    const recordCall = { from: wallet.address, to: dep.address, data: new Interface(art.abi as any).encodeFunctionData('record', [GAS_ESTIMATE_HASH]) };
+    const recordEstimate = await estimateGas(rpc, recordCall);
+    const recordLimit = gasLimitFrom(recordEstimate);
+    log(`  record() estimate ${recordEstimate} -> gas limit ${recordLimit}`);
 
     const nonceNow = async () => Number(BigInt(await rpc.send('eth_getTransactionCount', [wallet.address, 'pending'])));
-    const mkChain = async () => new WalletChain(rpc, wallet, dep.address, chainId, await currentFees(rpc), pollMs, art.abi);
+    const mkChain = async () => new WalletChain(rpc, wallet, dep.address, chainId, await currentFees(rpc), pollMs, art.abi, recordLimit);
 
     // Mode A
     log('Mode A: one after another...');
@@ -196,6 +221,14 @@ async function runBench(chain: 'local' | 'sepolia') {
       contract: { name: art.contract, compiler: art.compiler, sourceSha256: art.sourceSha256 },
       workload: { credentials: work.files.length, directory: path.relative('.', CREDS).split(path.sep).join('/'), totalJwtBytes: work.totalBytes, modeBHashing: 'SHA-256("modeB\\n" + JWT), because a hash can be recorded only once' },
       params: { window: WINDOW, receiptPollMs: pollMs, requestPaceMsInCheck: paceMs, finalityPollMs: chain === 'sepolia' ? 12_000 : null },
+      gas: {
+        rules: node ? node.hardfork : SEPOLIA_RULES,
+        deploy: { estimate: dep.gasEstimate.toString(), limit: dep.gasLimit.toString(), estimatedFrom: 'eth_estimateGas from the wallet with the contract creation code, before the timed send' },
+        record: { estimate: recordEstimate.toString(), limit: recordLimit.toString(), estimatedFrom: `eth_estimateGas for record() on the deployed contract with an unused fingerprint (SHA-256 of "gas-estimate"), after deployment and before Mode A` },
+        limitRule: 'gas limit = ceil(estimate × 1.25); only the gas used is charged',
+        note: GAS_NOTE,
+      },
+      engine: node ? { hardhat: node.version, edr: node.edrVersion, hardfork: node.hardfork, supportedAmsterdamEips: node.supportedEips, eipSource: node.supportedEips ? 'https://hardhat.org/docs/reference/amsterdam-support (the page names no Hardhat version)' : null } : null,
       deploy: { address: dep.address, txHash: dep.txHash, ms: dep.ms, gasUsed: dep.gasUsed, blockNumber: dep.blockNumber },
       modeA: { ms: timeA, gasUsed: gasA, wallSeconds: (A[A.length - 1].includedAt - A[0].sentAt) / 1000, transactions: A.map((r) => ({ file: work.files[r.index], hash: r.hash, txHash: r.txHash, nonce: r.nonce, ms: r.ms, blockNumber: r.blockNumber, gasUsed: r.gasUsed, effectiveGasPriceWei: r.effectiveGasPrice.toString() })) },
       modeB: { ms: timeB, gasUsed: gasB, wallSeconds: B.wallMs / 1000, throughputPerSecond: B.throughput, maxWaiting: B.maxWaiting, transactions: B.results.map((r) => ({ file: work.files[r.index], hash: r.hash, txHash: r.txHash, nonce: r.nonce, ms: r.ms, blockNumber: r.blockNumber, gasUsed: r.gasUsed, effectiveGasPriceWei: r.effectiveGasPrice.toString() })) },
@@ -229,6 +262,7 @@ async function runBench(chain: 'local' | 'sepolia') {
 // ── report ───────────────────────────────────────────────────
 function report(r: any, fee: { perCredential: { gwei: number; eth: number; usd: number | null }; deploy: { gwei: number; eth: number; usd: number | null } } | null, feeCtx: Awaited<ReturnType<typeof mainnetFeeContext>>, usingDefaultRpc: boolean): string {
   const isSep = r.chain === 'sepolia';
+  const kindText = isSep ? 'the Sepolia test network' : r.chain === 'local-amsterdam' ? 'a local development chain with the Amsterdam hardfork' : 'a local development chain';
   const eth = (x: number) => (x < 1e-4 ? x.toExponential(3) : x.toFixed(6));
   const usd = (x: number | null) => (x === null ? 'n/a' : `$${x < 0.01 ? x.toFixed(4) : x.toFixed(2)}`);
   const sec = (x: number) => (x < 1000 ? `${x.toFixed(1)} ms` : `${(x / 1000).toFixed(2)} s`);
@@ -239,7 +273,7 @@ function report(r: any, fee: { perCredential: { gwei: number; eth: number; usd: 
     `| Time to check a score | signature and DID checks, offline or online (E1) | recordedAt median ${r.check.ms.median.toFixed(2)} ms (p95 ${r.check.ms.p95.toFixed(2)} ms); shows only that the fingerprint was recorded |`,
     `| Scores per second (Mode B) | issuing throughput (E1) | ${r.modeB.throughputPerSecond.toFixed(2)} per second (${r.modeB.wallSeconds.toFixed(2)} s for 100, at most ${r.params.window} waiting) |`,
   ];
-  return `# E2 — Fingerprints of the 100 signed credentials on ${isSep ? 'the Sepolia test network' : 'a local development chain'}
+  return `# E2 — Fingerprints of the 100 signed credentials on ${kindText}
 
 ${r.label} Started ${r.startedAt}. Chain id ${r.chainId}. ${r.tool.name}${r.tool.version ? ` ${r.tool.version}` : ''}${r.tool.client ? ` (client: ${r.tool.client})` : ''}. RPC: ${r.rpc}. Contract ${r.contract.name} compiled with ${r.contract.compiler} (source SHA-256 ${r.contract.sourceSha256.slice(0, 16)}…).
 Machine: ${r.environment.cpu}, ${r.environment.cores} threads, ${r.environment.ramGB} GB, ${r.environment.os}, Node ${r.environment.node}.
@@ -252,6 +286,17 @@ Workload: the ${r.workload.credentials} signed credentials in \`${r.workload.dir
 |---|---|---|
 ${finalRows.join('\n')}
 
+## Gas limits and gas rules
+
+Rules the chain follows: **${r.gas.rules}**.${r.engine ? ` Hardhat ${r.engine.hardhat}${r.engine.edr ? `, EDR ${r.engine.edr}` : ''}.` : ''}
+
+| | Estimate (gas) | Gas limit (gas) | Gas used | Estimated by |
+|---|---:|---:|---:|---|
+| deploy | ${r.gas.deploy.estimate} | ${r.gas.deploy.limit} | ${r.deploy.gasUsed} | ${r.gas.deploy.estimatedFrom} |
+| record() | ${r.gas.record.estimate} | ${r.gas.record.limit} | ${Math.round(r.modeA.gasUsed.median)} (median, Mode A) | ${r.gas.record.estimatedFrom} |
+
+Limit rule: ${r.gas.limitRule}. ${r.gas.note}
+${r.engine?.supportedAmsterdamEips ? `\nAmsterdam EIPs that Hardhat ${r.engine.hardhat} supports, according to ${r.engine.eipSource} (experimental and incomplete there):\n\n${r.engine.supportedAmsterdamEips.map((e: string) => `- ${e}`).join('\n')}\n` : ''}
 ## One-time: deploy
 
 | Time until included | Gas used | Address |
@@ -312,7 +357,7 @@ ${feeCtx.errors.length ? `\nLookup problems: ${feeCtx.errors.join('; ')}.\n` : '
 
 // ── main ─────────────────────────────────────────────────────
 async function main() {
-  if (CHAIN !== 'local' && CHAIN !== 'sepolia') die('usage: npx tsx src/bench/e2.ts --chain=local | --chain=sepolia [--new-wallet | --dry-run | --yes]');
+  if (CHAIN !== 'local' && CHAIN !== 'local-amsterdam' && CHAIN !== 'sepolia') die('usage: npx tsx src/bench/e2.ts --chain=local | --chain=local-amsterdam | --chain=sepolia [--new-wallet | --dry-run | --yes]');
   if (flag('new-wallet')) { if (CHAIN !== 'sepolia') die('--new-wallet is for --chain=sepolia'); return newWallet(); }
   if (CHAIN === 'sepolia') {
     if (flag('dry-run')) return dryRun();

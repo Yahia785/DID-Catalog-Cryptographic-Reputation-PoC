@@ -1,0 +1,9 @@
+{
+  "name": "e2-amsterdam-node",
+  "private": true,
+  "type": "module",
+  "description": "Hardhat 3 simulated L1 node with the amsterdam hardfork, used by src/bench/e2.ts --chain=local-amsterdam. Separate from the project's Hardhat 2.",
+  "dependencies": {
+    "hardhat": "3.22.0"
+  }
+}
