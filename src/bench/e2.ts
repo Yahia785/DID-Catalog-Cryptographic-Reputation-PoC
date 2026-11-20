@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { Interface, Wallet, formatEther } from 'ethers';
 import {
-  DEV_KEY, JsonRpc, RECORD_GAS_UPPER, WalletChain, currentFees, deployContract, estimateGas, estimateNeedWei, feeOf, gasLimitFrom, hashJwt,
+  DEV_KEY, JsonRpc, RECORD_GAS_UPPER, WalletChain, currentFees, deployContract, estimateGas, estimateNeedWei, feeOf, gasLimitFrom, hashJwt, chooseRecordGas, planNonces, waitForCode,
   loadArtifact, mainnetFeeContext, modeA, modeB, startLocalNode, timedRecordedAt, waitFinality, type LocalNode,
 } from './e2-lib.js';
 import { summarize, type Summary } from './stats.js';
@@ -76,7 +76,7 @@ const origin = (u: string) => { try { return new URL(u).origin; } catch { return
 const gwei = (wei: bigint) => (Number(wei) / 1e9).toString();
 
 // ── Sepolia setup shared by dry run and real run ─────────────
-interface RecordEstimate { gas: bigint; basis: string }
+interface RecordEstimate { gas: bigint; basis: string; overridden: boolean }
 
 /** Runtime code of the contract: an eth_call without `to` runs the creation code and returns what would be stored. */
 async function runtimeCode(rpc: JsonRpc, from: string, initCode: string): Promise<string> {
@@ -90,9 +90,9 @@ async function estimateRecordWithOverride(rpc: JsonRpc, from: string, art: Retur
     const code = await runtimeCode(rpc, from, art.bytecode);
     if (!code || code === '0x') throw new Error('no runtime code returned');
     const gas = await estimateGas(rpc, { from, to: DUMMY_ADDRESS, data }, { [DUMMY_ADDRESS]: { code } });
-    return { gas, basis: `eth_estimateGas with a state override (runtime code at ${DUMMY_ADDRESS})` };
+    return { gas, basis: `eth_estimateGas with a state override (runtime code at ${DUMMY_ADDRESS})`, overridden: true };
   } catch (e) {
-    return { gas: RECORD_GAS_UPPER, basis: `fixed upper value ${RECORD_GAS_UPPER}: the node did not accept a state-override estimate (${(e as Error).message.slice(0, 160)})` };
+    return { gas: RECORD_GAS_UPPER, basis: `fixed upper value ${RECORD_GAS_UPPER}: the node did not accept a state-override estimate (${(e as Error).message.slice(0, 160)})`, overridden: false };
   }
 }
 
@@ -166,25 +166,39 @@ async function runBench(chain: ChainName) {
     const feeCtx = await mainnetFeeContext();
     for (const e of feeCtx.errors) log(`  ! ${e}`);
 
+    // nonces: read the pending count once, then count locally (a load-balanced RPC can answer from a lagging backend)
+    const baseNonce = Number(BigInt(await rpc.send('eth_getTransactionCount', [wallet.address, 'pending'])));
+    const plan = planNonces(baseNonce, work.files.length);
+    log(`nonces (read once, then counted here): deploy ${plan.deploy}, Mode A ${plan.modeAStart}..${plan.modeBStart - 1}, Mode B ${plan.modeBStart}..${plan.next - 1}`);
+    const expectedCode = await runtimeCode(rpc, wallet.address, art.bytecode);
+    if (!expectedCode || expectedCode === '0x') throw new Error('could not obtain the runtime code of the contract (eth_call of the creation code returned nothing)');
+
     // deploy
     log('deploying...');
     const dfees = await currentFees(rpc);
-    const dep = await deployContract(rpc, wallet, chainId, art, dfees, pollMs);
+    const dep = await deployContract(rpc, wallet, chainId, art, dfees, pollMs, plan.deploy);
     log(`  deployed at ${dep.address}: ${(dep.ms).toFixed(0)} ms, gas ${dep.gasUsed} (estimate ${dep.gasEstimate}, limit ${dep.gasLimit})`);
 
-    // estimate record() once, after deployment and before Mode A, outside every timing
+    // wait until the node answers with the deployed code, then estimate record() once; before Mode A, outside every timing
+    log('  waiting until the deployed code is visible (3 equal reads of eth_getCode)...');
+    const codeReads = await waitForCode(rpc, dep.address, expectedCode, { pollMs: chain === 'sepolia' ? 2000 : 20 });
+    log(`  code visible after ${codeReads} reads`);
     const recordCall = { from: wallet.address, to: dep.address, data: new Interface(art.abi as any).encodeFunctionData('record', [GAS_ESTIMATE_HASH]) };
-    const recordEstimate = await estimateGas(rpc, recordCall);
+    const liveEstimate = await estimateGas(rpc, recordCall);
+    const ov = await estimateRecordWithOverride(rpc, wallet.address, art);
+    const overrideEstimate = ov.overridden ? ov.gas : null;
+    const pick = chooseRecordGas(liveEstimate, overrideEstimate);
+    if (pick.warn) log(`  ! WARNING: the estimate on the live contract (${liveEstimate}) is below half of the state-override estimate (${overrideEstimate}): the node may be lagging; using the larger value`);
+    const recordEstimate = pick.gas;
     const recordLimit = gasLimitFrom(recordEstimate);
-    log(`  record() estimate ${recordEstimate} -> gas limit ${recordLimit}`);
+    log(`  record() estimate: live ${liveEstimate}, state override ${overrideEstimate ?? 'not available'} -> using ${recordEstimate}, gas limit ${recordLimit}`);
 
-    const nonceNow = async () => Number(BigInt(await rpc.send('eth_getTransactionCount', [wallet.address, 'pending'])));
     const mkChain = async () => new WalletChain(rpc, wallet, dep.address, chainId, await currentFees(rpc), pollMs, art.abi, recordLimit);
 
     // Mode A
     log('Mode A: one after another...');
     const chainA = await mkChain();
-    const A = await modeA(chainA, work.hashesA, await nonceNow(), (i, r) => { if (i % 10 === 9 || i === 0) log(`  ${i + 1}/100  last ${ms1(r.ms)} ms`); });
+    const A = await modeA(chainA, work.hashesA, plan.modeAStart, (i, r) => { if (i % 10 === 9 || i === 0) log(`  ${i + 1}/100  last ${ms1(r.ms)} ms`); });
 
     // finality (Sepolia)
     let fin: Awaited<ReturnType<typeof waitFinality>> | null = null;
@@ -197,7 +211,7 @@ async function runBench(chain: ChainName) {
     // Mode B
     log(`Mode B: all at once, at most ${WINDOW} waiting...`);
     const chainB = await mkChain();
-    const B = await modeB(chainB, work.hashesB, await nonceNow(), WINDOW);
+    const B = await modeB(chainB, work.hashesB, plan.modeBStart, WINDOW);
     log(`  ${B.results.length} included in ${(B.wallMs / 1000).toFixed(2)} s (${B.throughput.toFixed(2)} per second), most waiting at once: ${B.maxWaiting}`);
 
     // check
@@ -224,7 +238,8 @@ async function runBench(chain: ChainName) {
       gas: {
         rules: node ? node.hardfork : SEPOLIA_RULES,
         deploy: { estimate: dep.gasEstimate.toString(), limit: dep.gasLimit.toString(), estimatedFrom: 'eth_estimateGas from the wallet with the contract creation code, before the timed send' },
-        record: { estimate: recordEstimate.toString(), limit: recordLimit.toString(), estimatedFrom: `eth_estimateGas for record() on the deployed contract with an unused fingerprint (SHA-256 of "gas-estimate"), after deployment and before Mode A` },
+        record: { estimate: recordEstimate.toString(), liveEstimate: liveEstimate.toString(), overrideEstimate: overrideEstimate?.toString() ?? null, lowLiveEstimateWarning: pick.warn, limit: recordLimit.toString(), estimatedFrom: `the larger of eth_estimateGas on the deployed contract (live) and eth_estimateGas with a state override, for record() with an unused fingerprint (SHA-256 of "gas-estimate"), after the deployed code was seen and before Mode A` },
+        nonces: { baseReadOnce: baseNonce, deploy: plan.deploy, modeAFirst: plan.modeAStart, modeBFirst: plan.modeBStart, codeReadsBeforeEstimate: codeReads, note: 'nonces are counted locally; the node is asked once, before the deploy' },
         limitRule: 'gas limit = ceil(estimate × 1.25); only the gas used is charged',
         note: GAS_NOTE,
       },
@@ -293,7 +308,7 @@ Rules the chain follows: **${r.gas.rules}**.${r.engine ? ` Hardhat ${r.engine.ha
 | | Estimate (gas) | Gas limit (gas) | Gas used | Estimated by |
 |---|---:|---:|---:|---|
 | deploy | ${r.gas.deploy.estimate} | ${r.gas.deploy.limit} | ${r.deploy.gasUsed} | ${r.gas.deploy.estimatedFrom} |
-| record() | ${r.gas.record.estimate} | ${r.gas.record.limit} | ${Math.round(r.modeA.gasUsed.median)} (median, Mode A) | ${r.gas.record.estimatedFrom} |
+| record() | ${r.gas.record.estimate} (live ${r.gas.record.liveEstimate}, state override ${r.gas.record.overrideEstimate ?? 'n/a'}${r.gas.record.lowLiveEstimateWarning ? ', live estimate was suspiciously low' : ''}) | ${r.gas.record.limit} | ${Math.round(r.modeA.gasUsed.median)} (median, Mode A) | ${r.gas.record.estimatedFrom} |
 
 Limit rule: ${r.gas.limitRule}. ${r.gas.note}
 ${r.engine?.supportedAmsterdamEips ? `\nAmsterdam EIPs that Hardhat ${r.engine.hardhat} supports, according to ${r.engine.eipSource} (experimental and incomplete there):\n\n${r.engine.supportedAmsterdamEips.map((e: string) => `- ${e}`).join('\n')}\n` : ''}
@@ -363,7 +378,7 @@ async function main() {
     if (flag('dry-run')) return dryRun();
     if (!flag('yes')) die('A real Sepolia run needs --yes. Use --dry-run first to see the balance and the estimated need. Nothing was sent.');
   }
-  await runBench(CHAIN);
+  await runBench(CHAIN as ChainName);
 }
 
 main().catch((e) => { console.error(e instanceof Error ? e.message : e); process.exit(1); });

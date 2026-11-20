@@ -177,6 +177,55 @@ export async function estimateGas(rpc: JsonRpc, tx: { from: string; to?: string 
   return BigInt(await rpc.send<string>('eth_estimateGas', params));
 }
 
+/**
+ * Nonce plan, counted locally: read the 'pending' count once before the deploy, never again. Deploy uses `base`, Mode A starts
+ * at base + 1, Mode B at base + 1 + n. (A load-balanced RPC can answer a nonce read from a backend that lags behind.)
+ */
+export function planNonces(base: number, n = 100): { deploy: number; modeAStart: number; modeBStart: number; next: number } {
+  return { deploy: base, modeAStart: base + 1, modeBStart: base + 1 + n, next: base + 1 + 2 * n };
+}
+
+/**
+ * Pick the gas estimate for record(): the larger of the estimate on the live contract and the state-override estimate (which
+ * is null when the node would not give one). A live estimate below half the override estimate is suspicious (a lagging
+ * backend that does not see the contract's state): `warn` is then true.
+ */
+export function chooseRecordGas(live: bigint, override: bigint | null): { gas: bigint; warn: boolean } {
+  if (override === null) return { gas: live, warn: false };
+  return { gas: live > override ? live : override, warn: live * 2n < override };
+}
+
+/** True when a send error means the nonce was already used (or the transaction is already known): never retry with another nonce. */
+export const NONCE_ERROR = /nonce too low|already known|known transaction|replacement transaction underpriced/i;
+
+/** eth_sendRawTransaction, turning "nonce too low" / "already known" into one clear message. */
+export async function sendRaw(rpc: JsonRpc, raw: string, what: string): Promise<void> {
+  try { await rpc.send('eth_sendRawTransaction', [raw]); } catch (e) {
+    const msg = (e as Error).message;
+    if (NONCE_ERROR.test(msg)) throw new Error(`${what}: the node refused the nonce (${msg}). Nonces are counted locally and never re-read from the node, so this run stops here without retrying. Check the wallet's transactions on the block explorer before running again.`);
+    throw e;
+  }
+}
+
+/**
+ * Poll eth_getCode until it is non-empty and equals the expected runtime code for `consecutive` reads in a row (a load-balanced
+ * RPC can answer from a backend that has not seen the deployment yet). A read that differs resets the count.
+ */
+export async function waitForCode(rpc: JsonRpc, address: string, expected: string, opts: { pollMs?: number; consecutive?: number; timeoutMs?: number } = {}): Promise<number> {
+  const pollMs = opts.pollMs ?? 2000, need = opts.consecutive ?? 3, timeoutMs = opts.timeoutMs ?? 120_000;
+  const want = expected.toLowerCase();
+  const start = performance.now();
+  let ok = 0, reads = 0, last = '';
+  for (;;) {
+    const code = String(await rpc.send<string>('eth_getCode', [address, 'latest'])).toLowerCase();
+    reads++; last = code;
+    ok = code !== '0x' && code === want ? ok + 1 : 0;
+    if (ok >= need) return reads;
+    if (performance.now() - start > timeoutMs) throw new Error(`the code at ${address} did not match the expected runtime code in ${Math.round(timeoutMs / 1000)} s (${reads} reads; last read: ${last === '0x' ? 'empty' : `${(last.length - 2) / 2} bytes, different`}): the RPC may be lagging; stopping`);
+    await sleep(pollMs);
+  }
+}
+
 /** Upper value per record() used by the Sepolia dry run when the node rejects state overrides. */
 export const RECORD_GAS_UPPER = 300_000n;
 
@@ -194,7 +243,7 @@ export class WalletChain implements TxChain {
   backoffMs() { return this.rpc.backoffMs; }
   async send(h: string, nonce: number): Promise<string> {
     const raw = await this.wallet.signTransaction({ type: 2, chainId: this.chainId, nonce, to: this.contract, value: 0n, data: this.iface.encodeFunctionData('record', [h]), gasLimit: this.gasLimit, ...this.fees });
-    await this.rpc.send('eth_sendRawTransaction', [raw]);
+    await sendRaw(this.rpc, raw, `record(${h})`);
     return Transaction.from(raw).hash!;
   }
   waitForReceipt(txHash: string) { return waitForReceipt(this.rpc, txHash, this.pollMs, this.timeoutMs); }
@@ -219,14 +268,13 @@ export async function currentFees(rpc: JsonRpc): Promise<Fees & { baseFeePerGas:
   return { baseFeePerGas: base, maxPriorityFeePerGas: tip, maxFeePerGas: 3n * base + tip };
 }
 
-/** Deploy. The gas is estimated first (before the clock starts) and the limit is gasLimitFrom(estimate). */
-export async function deployContract(rpc: JsonRpc, wallet: Wallet, chainId: bigint, art: Artifact, fees: Fees, pollMs: number) {
-  const nonce = Number(BigInt(await rpc.send('eth_getTransactionCount', [wallet.address, 'pending'])));
+/** Deploy with the given nonce (the caller counts nonces). The gas is estimated first (before the clock starts) and the limit is gasLimitFrom(estimate). */
+export async function deployContract(rpc: JsonRpc, wallet: Wallet, chainId: bigint, art: Artifact, fees: Fees, pollMs: number, nonce: number) {
   const gasEstimate = await estimateGas(rpc, { from: wallet.address, data: art.bytecode });
   const gasLimit = gasLimitFrom(gasEstimate);
   const raw = await wallet.signTransaction({ type: 2, chainId, nonce, to: null, value: 0n, data: art.bytecode, gasLimit, ...fees });
   const t0 = performance.now(), b0 = rpc.backoffMs;
-  await rpc.send('eth_sendRawTransaction', [raw]);
+  await sendRaw(rpc, raw, 'deployment');
   const txHash = Transaction.from(raw).hash!;
   const rc = await waitForReceipt(rpc, txHash, pollMs);
   const ms = performance.now() - t0 - (rpc.backoffMs - b0);

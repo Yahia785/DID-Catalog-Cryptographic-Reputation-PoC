@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
 import { Interface, Transaction, Wallet } from 'ethers';
-import { DEV_KEY, JsonRpc, WalletChain, currentFees, deployContract, estimateGas, estimateNeedWei, feeOf, gasLimitFrom, hashJwt, revertMessage, loadArtifact, modeB, runWindowed, startLocalNode, timedRecordedAt, type LocalNode, type Receipt, type TxChain } from '../src/bench/e2-lib.js';
+import { DEV_KEY, JsonRpc, WalletChain, currentFees, deployContract, estimateGas, estimateNeedWei, feeOf, gasLimitFrom, hashJwt, revertMessage, planNonces, chooseRecordGas, waitForCode, sendRaw, loadArtifact, modeB, runWindowed, startLocalNode, timedRecordedAt, type LocalNode, type Receipt, type TxChain } from '../src/bench/e2-lib.js';
 
 describe('hashJwt', () => {
   it('is the SHA-256 of the string as bytes32 (known example: "abc")', () => {
@@ -74,7 +74,7 @@ describe('CredentialRegistry on a local chain', { timeout: 120_000 }, () => {
     rpc = new JsonRpc(node.url);
     wallet = new Wallet(DEV_KEY);
     chainId = BigInt(await rpc.send('eth_chainId'));
-    address = (await deployContract(rpc, wallet, chainId, art, await currentFees(rpc), 5)).address;
+    address = (await deployContract(rpc, wallet, chainId, art, await currentFees(rpc), 5, Number(BigInt(await rpc.send('eth_getTransactionCount', [wallet.address, 'pending']))))).address;
   });
   after(async () => { await node?.stop(); });
 
@@ -141,5 +141,59 @@ describe('gas limits from estimates', () => {
     assert.deepEqual(calls[0].params, [{ from: '0xf', data: '0x00' }, 'latest']);
     await estimateGas(rpc, { from: '0xf', to: '0xt', data: '0x01' }, { '0xt': { code: '0x60' } });
     assert.deepEqual(calls[1].params, [{ from: '0xf', to: '0xt', data: '0x01' }, 'latest', { '0xt': { code: '0x60' } }]);
+  });
+});
+
+describe('nonce plan', () => {
+  it('deploy n, Mode A n+1..n+100, Mode B n+101..n+200', () => {
+    const p = planNonces(7);
+    assert.equal(p.deploy, 7); assert.equal(p.modeAStart, 8); assert.equal(p.modeBStart, 108); assert.equal(p.next, 208);
+    const all = [p.deploy, ...Array.from({ length: 100 }, (_, i) => p.modeAStart + i), ...Array.from({ length: 100 }, (_, i) => p.modeBStart + i)];
+    assert.equal(new Set(all).size, 201);
+    assert.deepEqual(all, Array.from({ length: 201 }, (_, i) => 7 + i));
+  });
+  it('works from nonce 0 and for other workload sizes', () => {
+    assert.deepEqual(planNonces(0, 3), { deploy: 0, modeAStart: 1, modeBStart: 4, next: 7 });
+  });
+});
+
+describe('record() estimate choice', () => {
+  it('takes the larger of live and override', () => {
+    assert.equal(chooseRecordGas(17_466n, 128_488n).gas, 128_488n);
+    assert.equal(chooseRecordGas(130_000n, 128_488n).gas, 130_000n);
+  });
+  it('warns when live is below 50% of override, not at exactly 50% or above', () => {
+    assert.equal(chooseRecordGas(17_466n, 128_488n).warn, true);
+    assert.equal(chooseRecordGas(50n, 100n).warn, false);
+    assert.equal(chooseRecordGas(49n, 100n).warn, true);
+    assert.equal(chooseRecordGas(127_400n, 128_488n).warn, false);
+  });
+  it('uses live alone, without a warning, when there is no override estimate', () => {
+    assert.deepEqual(chooseRecordGas(21_000n, null), { gas: 21_000n, warn: false });
+  });
+});
+
+describe('waitForCode', () => {
+  const rpcOf = (answers: string[]) => { let i = 0; return { send: async () => answers[Math.min(i++, answers.length - 1)] } as unknown as JsonRpc; };
+  it('needs 3 equal reads in a row; empty reads and differing reads reset the count', async () => {
+    const reads = await waitForCode(rpcOf(['0x', '0xAB', '0x', '0xab', '0xab', '0xab']), '0x1', '0xab', { pollMs: 1 });
+    assert.equal(reads, 6);
+  });
+  it('stops with a clear message when the code never appears', async () => {
+    await assert.rejects(waitForCode(rpcOf(['0x']), '0x1', '0xab', { pollMs: 1, timeoutMs: 30 }), /did not match the expected runtime code/);
+  });
+  it('stops when the code is different from the expected', async () => {
+    await assert.rejects(waitForCode(rpcOf(['0xcd']), '0x1', '0xab', { pollMs: 1, timeoutMs: 30 }), /different/);
+  });
+});
+
+describe('sendRaw', () => {
+  const failing = (msg: string) => ({ send: async () => { throw new Error(`eth_sendRawTransaction: ${msg}`); } }) as unknown as JsonRpc;
+  it('turns "nonce too low" and "already known" into one clear stop message', async () => {
+    await assert.rejects(sendRaw(failing('nonce too low: next nonce 2, tx nonce 1'), '0x', 'record(x)'), /refused the nonce.*never re-read.*without retrying/s);
+    await assert.rejects(sendRaw(failing('already known'), '0x', 'record(x)'), /refused the nonce/);
+  });
+  it('passes other errors through unchanged', async () => {
+    await assert.rejects(sendRaw(failing('insufficient funds'), '0x', 'x'), /insufficient funds/);
   });
 });
